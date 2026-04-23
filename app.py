@@ -9,47 +9,62 @@ import streamlit.components.v1 as components
 
 warnings.filterwarnings("ignore")
 
-# ----------------- SAYFA AYARLARI -----------------
-st.set_page_config(page_title="EnerjiSA Çok Günlü Rotalama", layout="wide")
+# ==========================================
+# 1. ARAYÜZ VE SİDEBAR AYARLARI
+# ==========================================
+st.set_page_config(page_title="EnerjiSA Dinamik Rotalama", layout="wide")
 
-# ----------------- SABİT PARAMETRELER -----------------
+st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/4/41/Enerjisa_logo.png", width=150)
+st.sidebar.header("⚙️ Kontrol Paneli")
+uploaded_file = st.sidebar.file_uploader("İş Verisini Yükle (CSV/Excel)", type=['csv', 'xlsx'])
+
+st.sidebar.markdown("### 🧠 Optimizasyon Parametreleri")
+alpha_val = st.sidebar.slider("Öncelik-Mesafe Dengesi (Alpha)", 0.0, 1.0, 0.5, 0.1, help="0: Tamamen cezaya/önceliğe odaklan, 1: Tamamen en kısa mesafeye odaklan.")
+aging_val = st.sidebar.slider("Yaşlandırma Katsayısı (Aging)", 1.0, 5.0, 2.0, 0.1, help="Ertelenen işin cezası her gün bu katsayı ile çarpılır.")
+op_count = st.sidebar.number_input("Operatör Sayısı", min_value=1, max_value=50, value=15)
+
+st.sidebar.markdown("### 🚙 Saha ve Maliyet Parametreleri")
+hiz_km_dk = st.sidebar.number_input("Araç Hızı (km/dk)", value=0.5, step=0.1)
+zb_hedef = st.sidebar.slider("ZB Tamamlama Hedefi (%)", 0, 100, 30)
+c_ticari = st.sidebar.number_input("Ticari Tazminat (TRY)", value=2216.0, step=100.0)
+c_mesken = st.sidebar.number_input("Mesken Tazminat (TRY)", value=277.0, step=10.0)
+
+# ==========================================
+# 2. DİNAMİK SABİTLER (Arayüzden beslenir)
+# ==========================================
 VARDIYA_BASLANGIC_SAAT = 8
 VARDIYA_BITIS_SAAT = 18
 OGLEN_MOLA_BASLANGIC = 12
 OGLEN_MOLA_BITIS = 13.5  
 SERVIS_SURESI_DK = 10
-HIZ_KM_DK = 0.5
-YAKIT_TL_KM = 5.0
 EPSILON = 0.001
-
-C_TICARI = 2216.0
-C_MESKEN = 277.0
+FUEL_RATE = 5.0
 
 T0 = 0
 TEND = int((VARDIYA_BITIS_SAAT - VARDIYA_BASLANGIC_SAAT) * 60)
 TBREAK_S = int((OGLEN_MOLA_BASLANGIC - VARDIYA_BASLANGIC_SAAT) * 60)
 TBREAK_E = int((OGLEN_MOLA_BITIS - VARDIYA_BASLANGIC_SAAT) * 60)
 S_i = SERVIS_SURESI_DK
-V_KM_MIN = HIZ_KM_DK
-FUEL_RATE = YAKIT_TL_KM
+
+V_KM_MIN = hiz_km_dk
+C_TICARI = c_ticari
+C_MESKEN = c_mesken
+ZB_COVERAGE_TARGET = zb_hedef / 100.0
 
 PI = {'ZA': 1.0, 'ZR': 1.0, 'ZS': 0.3, 'ZB': 0.3, 'ZG': 0.3}
 PI_DEFAULT = 0.0
 PENALTI_TUR = {'ZA', 'ZR'}
 RISKY_TUR = {'ZB', 'ZG', 'ZS'}
-
 BALANCE_MAX_ITER = 5
 BALANCE_OVERFLOW_TH = 1.0
 MAX_TRANSFER_KM = 2.0
 KMEANS_INIT = 'k-means++'
 
-# ----------------- YARDIMCI FONKSİYONLAR -----------------
+# ==========================================
+# 3. YARDIMCI FONKSİYONLAR
+# ==========================================
 def dist_km(lat1, lon1, lat2, lon2):
     return math.sqrt(((lat1 - lat2) * 111) ** 2 + ((lon1 - lon2) * 83) ** 2)
-
-def dk_to_saat(dk):
-    h = int(dk // 60) + 8
-    return f"{h:02d}:{int(dk % 60):02d}"
 
 def job_cost_params(row):
     ist = str(row.get('Sipariş Türü', '')).upper()[:2]
@@ -75,7 +90,6 @@ def teorik_sure(op_coord, job_list, coords):
     mesafeler = [dist_km(olat, olon, coords[j][0], coords[j][1]) for j in job_list]
     return len(job_list) * S_i + (float(np.mean(mesafeler)) / V_KM_MIN) * len(job_list)
 
-# ----------------- DENGELEME VE ROTALAMA -----------------
 def balance_workload(op_jobs, op_ids, op_coords, coords, job_params_dict):
     for _ in range(BALANCE_MAX_ITER):
         yuk = {op: teorik_sure(op_coords[op], op_jobs[op], coords) for op in op_ids}
@@ -182,57 +196,63 @@ def greedy_select_and_route(op_id, origin, job_list, coords, job_params_dict, al
         schedule[j] = {'served': False, 'arrival': None, 'finish': None, 'late': False, 'fuel_cost': 0.0, 'fixed_pen': 0.0, 'tardy_pen': 0.0, 'unserved_pen': job_params_dict[j][2]}
     return route, schedule, unserved
 
-def build_map(all_routes, op_coords, coords):
+def build_map(all_routes, all_schedules, op_coords, coords):
     center = (np.mean([v[0] for v in coords.values()]), np.mean([v[1] for v in coords.values()]))
     m = folium.Map(location=center, zoom_start=11)
     COLORS = ['blue', 'red', 'green', 'purple', 'orange', 'darkred', 'cadetblue', 'darkblue']
     
+    # Çizgiler ve Tamamlanan İşler
     for idx, (op_id, route) in enumerate(all_routes.items()):
         color = COLORS[idx % len(COLORS)]
         olat, olon = op_coords[op_id]
-        folium.Marker([olat, olon], popup=f"Op: {op_id}", icon=folium.Icon(color=color, icon='home')).add_to(m)
+        folium.Marker([olat, olon], popup=f"Başlangıç: {op_id}", icon=folium.Icon(color=color, icon='home')).add_to(m)
         if route:
-            pts = [(olat, olon)] + [coords[j] for j in route]
-            folium.PolyLine(pts, color=color, weight=2.5, opacity=0.8).add_to(m)
+            pts = [(olat, olon)] + [coords[j] for j in route] + [(olat, olon)]
+            folium.PolyLine(pts, color=color, weight=3.5, opacity=0.8).add_to(m)
             for j in route:
-                folium.CircleMarker([coords[j][0], coords[j][1]], radius=5, color=color, fill=True, popup=j).add_to(m)
+                folium.CircleMarker([coords[j][0], coords[j][1]], radius=6, color=color, fill=True, popup=f"Tamamlandı: {j}").add_to(m)
+    
+    # Ertelenen Gri İşler (Unserved)
+    for op_id, sch in all_schedules.items():
+        for j, s in sch.items():
+            if not s['served']:
+                folium.CircleMarker(
+                    [coords[j][0], coords[j][1]], radius=5, color='gray', fill=True, fill_opacity=0.7,
+                    popup=f"Ertellendi: {j} (Zaman yetmedi)"
+                ).add_to(m)
     return m
 
-# ----------------- UYGULAMA ARAYÜZÜ (UI) -----------------
-st.title("⚡ EnerjiSA Saha Operasyonları: Rotalama & Gecikme Analizi")
-st.markdown("K-Means, Macar Algoritması ve Heuristik yöntemler kullanılarak çok günlü iş yükü ve ceza optimizasyonu.")
+# ==========================================
+# 4. SİMÜLASYON TETİKLEYİCİSİ
+# ==========================================
+st.title("⚡ EnerjiSA Dinamik Rotalama Panosu")
 
-st.sidebar.header("⚙️ Parametreler")
-uploaded_file = st.sidebar.file_uploader("İş Verisini Yükle (CSV/Excel)", type=['csv', 'xlsx'])
+# Session state hazırlıkları
+if "sim_data" not in st.session_state:
+    st.session_state.sim_data = None
+    st.session_state.gunler = []
 
-alpha_val = st.sidebar.slider("Öncelik-Mesafe Dengesi (Alpha)", 0.0, 1.0, 0.5, 0.1, help="0: Tamamen cezaya/önceliğe odaklan, 1: Tamamen en kısa mesafeye odaklan.")
-aging_val = st.sidebar.slider("Yaşlandırma Katsayısı (Aging)", 1.0, 5.0, 2.0, 0.1, help="Ertelenen bir işin cezası her gün bu katsayı ile çarpılır (Starvation engellemek için).")
-op_count = st.sidebar.number_input("Operatör Sayısı", min_value=1, max_value=50, value=15)
-
-if st.sidebar.button("🚀 Simülasyonu Başlat", type="primary"):
+if st.sidebar.button("🚀 Simülasyonu Başlat", type="primary", use_container_width=True):
     if uploaded_file is None:
-        st.warning("Lütfen önce veri setini yükleyin!")
+        st.error("Lütfen önce sol menüden veri seti yükleyin!")
     else:
-        with st.spinner("Veriler işleniyor ve optimizasyon yapılıyor. Bu işlem birkaç dakika sürebilir..."):
+        with st.spinner("Veriler işleniyor, rotalar çiziliyor. Lütfen bekleyin..."):
             
             # Veri Okuma
-            if uploaded_file.name.endswith('.csv'):
-                df_jobs = pd.read_csv(uploaded_file)
-            else:
-                df_jobs = pd.read_excel(uploaded_file)
+            if uploaded_file.name.endswith('.csv'): df_jobs = pd.read_csv(uploaded_file)
+            else: df_jobs = pd.read_excel(uploaded_file)
                 
             df_jobs['Tesisat Enlem'] = pd.to_numeric(df_jobs['Tesisat Enlem'].astype(str).str.replace(',', '.'), errors='coerce')
             df_jobs['Tesisat Boylam'] = pd.to_numeric(df_jobs['Tesisat Boylam'].astype(str).str.replace(',', '.'), errors='coerce')
             df_jobs = df_jobs.dropna(subset=['Tesisat Enlem', 'Tesisat Boylam']).reset_index(drop=True)
             
             tarih_col = next((c for c in df_jobs.columns if 'Planlanan' in c or 'Tarih' in c), None)
-            if tarih_col:
-                df_jobs[tarih_col] = df_jobs[tarih_col].astype(str).str.strip().str[:10]
-            else:
+            if tarih_col: df_jobs[tarih_col] = df_jobs[tarih_col].astype(str).str.strip().str[:10]
+            else: 
                 df_jobs['Planlanan Tarih'] = '24.11.2025'
                 tarih_col = 'Planlanan Tarih'
 
-            # Mock Operatörler Yarat
+            # Mock Operatörler
             op_ids = [f"Op_{i+1}" for i in range(int(op_count))]
             center_lat, center_lon = df_jobs['Tesisat Enlem'].mean(), df_jobs['Tesisat Boylam'].mean()
             np.random.seed(42)
@@ -247,18 +267,12 @@ if st.sidebar.button("🚀 Simülasyonu Başlat", type="primary"):
             gecikme_takip = {jid: {'ilk_planlanan': '', 'tamamlandi_gun': 'Tamamlanmadı', 'gecikme_gun_sayisi': 0, 'durum': 'Bekliyor'} for jid in coords.keys()}
             bekleyen_kuyruk = []
             
-            # Günlük İlerleme Barı
+            daily_results = {}
             progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            final_routes = {} # Harita için son günü tutacağız
 
             for gun_idx, bugun in enumerate(gunler):
-                status_text.text(f"İşleniyor: Gün {gun_idx+1}/{len(gunler)} - Tarih: {bugun}")
-                
                 bugunun_yeni_isleri = df_jobs[df_jobs[tarih_col] == bugun]['Sipariş No'].tolist()
-                for j in bugunun_yeni_isleri:
-                    gecikme_takip[j]['ilk_planlanan'] = bugun
+                for j in bugunun_yeni_isleri: gecikme_takip[j]['ilk_planlanan'] = bugun
                     
                 aktif_isler = bekleyen_kuyruk + bugunun_yeni_isleri
                 if not aktif_isler: 
@@ -286,61 +300,103 @@ if st.sidebar.button("🚀 Simülasyonu Başlat", type="primary"):
                 op_jobs = balance_workload(op_jobs, aktif_op_ids, op_coords, coords, job_params)
 
                 bekleyen_kuyruk = []
-                final_routes = {}
+                gunluk_rotalar = {}
+                gunluk_schedules = {}
+                gunluk_km = 0.0
+                gunluk_tamamlanan = 0
+                gunluk_ertelenen = 0
                 
                 for op in aktif_op_ids:
                     route, schedule, unserved = greedy_select_and_route(op, op_coords[op], op_jobs[op], coords, job_params, alpha_val)
-                    final_routes[op] = route
+                    gunluk_rotalar[op] = route
+                    gunluk_schedules[op] = schedule
+                    
+                    if route:
+                        pts = [op_coords[op]] + [coords[j] for j in route] + [op_coords[op]]
+                        gunluk_km += sum(dist_km(pts[i][0], pts[i][1], pts[i+1][0], pts[i+1][1]) for i in range(len(pts)-1))
+
                     for j in route:
                         if schedule[j]['served']:
                             gecikme_takip[j]['tamamlandi_gun'] = bugun
                             gecikme_takip[j]['durum'] = 'Tamamlandı'
+                            gunluk_tamamlanan += 1
+                            
                     for j in unserved:
                         bekleyen_kuyruk.append(j)
+                        gunluk_ertelenen += 1
                         gecikme_takip[j]['gecikme_gun_sayisi'] += 1
                         c_d, pi_i, p_u, b_i = job_params[j]
                         job_params[j] = (c_d, pi_i, p_u * aging_val, b_i)
+
+                daily_results[bugun] = {
+                    'routes': gunluk_rotalar,
+                    'schedules': gunluk_schedules,
+                    'km': gunluk_km,
+                    'tamamlanan': gunluk_tamamlanan,
+                    'ertelenen': gunluk_ertelenen
+                }
                 
                 progress_bar.progress((gun_idx + 1) / len(gunler))
             
-            status_text.text("Optimizasyon Tamamlandı!")
-            
-            # --- ANALİZ VE EKRANA YANSITMA ---
-            gecikme_df = pd.DataFrame.from_dict(gecikme_takip, orient='index')
-            gecikme_df.index.name = 'Sipariş No'
-            gecikme_df.reset_index(inplace=True)
-            gecikme_df = gecikme_df[gecikme_df['ilk_planlanan'] != ''] 
-            
-            tamamlananlar = gecikme_df[gecikme_df['durum'] == 'Tamamlandı']
-            hic_yapilamayanlar = gecikme_df[gecikme_df['durum'] == 'Bekliyor']
-            
-            st.markdown("### 📊 Sonuç Özetleri")
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Toplam İş Hacmi", len(gecikme_df))
-            col2.metric("Zamanında Biten (0 Gecikme)", len(tamamlananlar[tamamlananlar['gecikme_gun_sayisi'] == 0]))
-            col3.metric("Gecikmeli Biten", len(tamamlananlar[tamamlananlar['gecikme_gun_sayisi'] > 0]))
-            col4.metric("Kuyrukta Kalan (Yapılamayan)", len(hic_yapilamayanlar))
-            
-            st.markdown(f"**Ortalama Gecikme Süresi:** {gecikme_df['gecikme_gun_sayisi'].mean():.2f} Gün")
+            # Verileri UI için Session'a kaydet
+            gecikme_df = pd.DataFrame.from_dict(gecikme_takip, orient='index').reset_index().rename(columns={'index': 'Sipariş No'})
+            st.session_state.gecikme_df = gecikme_df[gecikme_df['ilk_planlanan'] != '']
+            st.session_state.sim_data = daily_results
+            st.session_state.gunler = gunler
+            st.session_state.op_coords = op_coords
+            st.session_state.coords = coords
 
-            # --- HARİTA ---
-            st.markdown("### 🗺️ Son Günün Operatör Rotaları")
-            map_obj = build_map(final_routes, op_coords, coords)
-            components.html(map_obj._repr_html_(), height=500)
-
-            # --- TABLO VE EXCEL İNDİRME ---
-            st.markdown("### 📋 Gecikme Takip Panosu")
-            st.dataframe(gecikme_df.sort_values(by="gecikme_gun_sayisi", ascending=False), use_container_width=True)
-            
-            # Excel Oluşturma ve Download Butonu
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                gecikme_df.to_excel(writer, sheet_name='Gecikme Panosu', index=False)
-            output.seek(0)
-            
-            st.download_button(
-                label="📥 Excel Raporunu İndir",
-                data=output,
-                file_name="EnerjiSA_Gecikme_Analizi.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+# ==========================================
+# 5. GÖRSELLEŞTİRME VE ANALİZ
+# ==========================================
+if st.session_state.sim_data:
+    st.success("Optimizasyon Başarıyla Tamamlandı!")
+    st.markdown("---")
+    
+    # GÜN SEÇİCİ (SLIDER)
+    st.markdown("### 🗺️ Günlük Rota Haritası")
+    selected_day = st.select_slider("Görüntülemek istediğiniz günü kaydırarak seçin:", options=st.session_state.gunler)
+    
+    day_data = st.session_state.sim_data[selected_day]
+    
+    # Haritayı Çiz
+    map_obj = build_map(day_data['routes'], day_data['schedules'], st.session_state.op_coords, st.session_state.coords)
+    components.html(map_obj._repr_html_(), height=500)
+    
+    # GÜNLÜK ANALİZ (Harita Altı)
+    st.markdown(f"#### 📊 {selected_day} - Günlük Rapor")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Toplam Araç Mesafesi", f"{day_data['km']:.1f} km")
+    col2.metric("Tamamlanan İş", f"{day_data['tamamlanan']} Adet")
+    col3.metric("Ertesi Güne Kalan (Kuyruk)", f"{day_data['ertelenen']} Adet")
+    
+    st.markdown("---")
+    
+    # GENEL HAFTALIK ÖZET
+    st.markdown("### 📋 5 Günlük Toplam Gecikme Analizi")
+    df = st.session_state.gecikme_df
+    
+    toplam_is = len(df)
+    zamaninda = len(df[df['gecikme_gun_sayisi'] == 0])
+    gec_kalan = len(df[(df['gecikme_gun_sayisi'] > 0) & (df['durum'] == 'Tamamlandı')])
+    yapilamayan = len(df[df['durum'] == 'Bekliyor'])
+    
+    scol1, scol2, scol3, scol4 = st.columns(4)
+    scol1.metric("Toplam İş Hacmi", toplam_is)
+    scol2.metric("Zamanında Biten", zamaninda)
+    scol3.metric("Gecikmeli Biten", gec_kalan)
+    scol4.metric("Simülasyon Sonu Bekleyen", yapilamayan)
+    
+    # Excel Download Butonu
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, sheet_name='Gecikme Panosu', index=False)
+    output.seek(0)
+    
+    st.download_button(
+        label="📥 Tüm Detaylı Gecikme Raporunu İndir (Excel)",
+        data=output,
+        file_name="EnerjiSA_Gecikme_Raporu.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True
+    )
