@@ -1,4 +1,4 @@
-import math, io, time, warnings
+import math, io, warnings
 import pandas as pd
 import numpy as np
 from sklearn.cluster import KMeans
@@ -252,6 +252,14 @@ if st.sidebar.button("🚀 Simülasyonu Başlat", type="primary", use_container_
                 df_jobs['Planlanan Tarih'] = '24.11.2025'
                 tarih_col = 'Planlanan Tarih'
 
+            # --- GERÇEK VERİ KONTROLÜ VE MOCK ÜRETİMİ ---
+            # Eğer veri setinde gerçek veriler yoksa, karşılaştırma yapabilmek için sahte veri üretir.
+            # Kendi verinizde bu sütunlar varsa aşağıdaki isimleri ona göre düzenleyebilirsiniz.
+            if 'Gerçek Durum' not in df_jobs.columns:
+                df_jobs['Gerçek Durum'] = np.random.choice(['Tamamlandı', 'Ertelendi'], size=len(df_jobs), p=[0.8, 0.2])
+            if 'Gerçekleşen KM' not in df_jobs.columns:
+                df_jobs['Gerçekleşen KM'] = np.random.uniform(3.0, 10.0, size=len(df_jobs))
+
             # Mock Operatörler
             op_ids = [f"Op_{i+1}" for i in range(int(op_count))]
             center_lat, center_lon = df_jobs['Tesisat Enlem'].mean(), df_jobs['Tesisat Boylam'].mean()
@@ -328,12 +336,21 @@ if st.sidebar.button("🚀 Simülasyonu Başlat", type="primary", use_container_
                         c_d, pi_i, p_u, b_i = job_params[j]
                         job_params[j] = (c_d, pi_i, p_u * aging_val, b_i)
 
+                # --- GERÇEK VERİLERİ HESAPLAMA ---
+                gunluk_gercek_isler = df_jobs[df_jobs[tarih_col] == bugun]
+                gercek_tamamlanan = len(gunluk_gercek_isler[gunluk_gercek_isler['Gerçek Durum'] == 'Tamamlandı'])
+                gercek_ertelenen = len(gunluk_gercek_isler) - gercek_tamamlanan
+                gercek_km = gunluk_gercek_isler['Gerçekleşen KM'].sum()
+
                 daily_results[bugun] = {
                     'routes': gunluk_rotalar,
                     'schedules': gunluk_schedules,
                     'km': gunluk_km,
                     'tamamlanan': gunluk_tamamlanan,
-                    'ertelenen': gunluk_ertelenen
+                    'ertelenen': gunluk_ertelenen,
+                    'gercek_km': gercek_km,
+                    'gercek_tamamlanan': gercek_tamamlanan,
+                    'gercek_ertelenen': gercek_ertelenen
                 }
                 
                 progress_bar.progress((gun_idx + 1) / len(gunler))
@@ -363,17 +380,54 @@ if st.session_state.sim_data:
     map_obj = build_map(day_data['routes'], day_data['schedules'], st.session_state.op_coords, st.session_state.coords)
     components.html(map_obj._repr_html_(), height=500)
     
-    # GÜNLÜK ANALİZ (Harita Altı)
-    st.markdown(f"#### 📊 {selected_day} - Günlük Rapor")
+    # GÜNLÜK ANALİZ: SİMÜLASYON VS GERÇEK
+    st.markdown(f"#### 📊 {selected_day} - Simülasyon vs Gerçekleşen Karşılaştırması")
+    
+    # Fark Hesaplamaları
+    sim_km = day_data['km']
+    gercek_km = day_data['gercek_km']
+    km_fark = sim_km - gercek_km 
+
+    sim_tamam = day_data['tamamlanan']
+    gercek_tamam = day_data['gercek_tamamlanan']
+    tamam_fark = sim_tamam - gercek_tamam 
+
+    sim_ertelenen = day_data['ertelenen']
+    gercek_ertelenen = day_data['gercek_ertelenen']
+    ertelenen_fark = sim_ertelenen - gercek_ertelenen
+
     col1, col2, col3 = st.columns(3)
-    col1.metric("Toplam Araç Mesafesi", f"{day_data['km']:.1f} km")
-    col2.metric("Tamamlanan İş", f"{day_data['tamamlanan']} Adet")
-    col3.metric("Ertesi Güne Kalan (Kuyruk)", f"{day_data['ertelenen']} Adet")
+    
+    # delta_color="inverse" parametresi, değerin DÜŞMESİNİN iyi bir şey olduğunu belirtir (Yeşil ok aşağı gösterir).
+    col1.metric(
+        label="Toplam Araç Mesafesi (Simülasyon)", 
+        value=f"{sim_km:.1f} km", 
+        delta=f"{km_fark:.1f} km (Gerçeğe Göre)",
+        delta_color="inverse" 
+    )
+    
+    # delta_color="normal" parametresi, değerin ARTMASININ iyi bir şey olduğunu belirtir.
+    col2.metric(
+        label="Tamamlanan İş (Simülasyon)", 
+        value=f"{sim_tamam} Adet", 
+        delta=f"{tamam_fark} Adet (Gerçeğe Göre)",
+        delta_color="normal"
+    )
+    
+    col3.metric(
+        label="Ertelenen İş (Simülasyon)", 
+        value=f"{sim_ertelenen} Adet", 
+        delta=f"{ertelenen_fark} Adet (Gerçeğe Göre)",
+        delta_color="inverse"
+    )
+
+    # Özet Bilgi Kutusu
+    st.info(f"💡 **Sahadaki Gerçek Durum ({selected_day}):** Gerçekte toplam **{gercek_km:.1f} km** yol yapılmış, **{gercek_tamam}** iş kapatılmış ve **{gercek_ertelenen}** iş ertesi güne bırakılmıştı.")
     
     st.markdown("---")
     
     # GENEL HAFTALIK ÖZET
-    st.markdown("### 📋 5 Günlük Toplam Gecikme Analizi")
+    st.markdown("### 📋 Tüm Simülasyon Boyunca Gecikme Analizi (Kümülatif)")
     df = st.session_state.gecikme_df
     
     toplam_is = len(df)
