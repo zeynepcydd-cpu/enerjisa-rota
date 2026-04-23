@@ -12,7 +12,7 @@ warnings.filterwarnings("ignore")
 # ==========================================
 # 1. ARAYÜZ VE SİDEBAR AYARLARI
 # ==========================================
-st.set_page_config(page_title="EnerjiSA Dinamik Rotalama", layout="wide")
+st.set_page_config(page_title="EnerjiSA Rotalama", layout="wide")
 
 st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/4/41/Enerjisa_logo.png", width=150)
 st.sidebar.header("⚙️ Kontrol Paneli")
@@ -227,6 +227,19 @@ def build_map(all_routes, all_schedules, op_coords, coords):
 # ==========================================
 st.title("⚡ EnerjiSA Dinamik Rotalama Panosu")
 
+# --- EN ÜST AÇIKLAMA BÖLÜMÜ BAŞLANGICI ---
+st.markdown("""
+### ℹ️ Optimizasyon Algoritmaları ve Çalışma Mantığı
+Bu sistem, sahadaki arıza, kesme-açma ve bakım işlerinin en verimli şekilde dağıtılması için aşağıdaki algoritmik yaklaşımları kullanmaktadır:
+
+* **1. İş Ataması (Clustering & Assignment):** Sahadaki bekleyen işler öncelikle coğrafi konumlarına göre **K-Means Kümeleme (K-Means++)** algoritması ile operatör sayısı kadar bölgeye ayrılır. Ardından, kümelerin merkez noktaları ile operatörlerin başlangıç konumları arasındaki uzaklıklar üzerinden bir maliyet matrisi oluşturulur ve **Macar Algoritması (Hungarian Algorithm / Linear Sum Assignment)** kullanılarak kümeler operatörlere optimum (en düşük maliyetli) şekilde atanır.
+* **2. İş Yükü Dengeleme (Workload Balancing):** İlk atamalardan sonra, bazı operatörlerin toplam iş süresi mesai sınırını aşabilir. Bunu çözmek için **İteratif Sezgisel (Heuristic) Yük Kaydırma** algoritması devreye girer. Aşırı yüklü operatörlerin listesindeki en düşük öncelikli işler, mesai kapasitesi müsait olan ve konuma en yakın (maks. 2 km) komşu operatörlere devredilerek iş yükü dengelenir.
+* **3. Rotalama (Routing):** Her operatörün iş listesi netleştikten sonra, rota dizilimi **Öncelik Ağırlıklı En Yakın Komşu (Priority-based Nearest Neighbor)** algoritmasıyla oluşturulur (Mesafe ve iş önceliği/cezası Alpha parametresiyle dengelenir). Oluşan bu ilk rota, hat üzerindeki çapraz kesişmeleri gidermek ve toplam kat edilen kilometreyi minimize etmek amacıyla **2-Opt Yerel Arama (Local Search)** algoritması ile optimize edilir.
+* **4. Fizibilite ve Erteleme (Feasibility & Postponement):** Rota üzerinde sırayla **Zaman Çizelgesi Simülasyonu** işletilir. Operatörün hızı, her iş için ayrılan servis süresi (10 dk) ve öğle molası (12:00-13:30) dinamik olarak hesaplanır. Matematiksel olarak mesai bitiminden (18:00) önce tamamlanamayacağı (infeasible) tespit edilen işler sıradan çıkarılır. Bu ertelenen işler, "Yaşlandırma Katsayısı (Aging)" ile cezası katlanmış şekilde ertesi günün bekleyen kuyruğuna aktarılır.
+---
+""")
+# --- EN ÜST AÇIKLAMA BÖLÜMÜ BİTİŞİ ---
+
 # Session state hazırlıkları
 if "sim_data" not in st.session_state:
     st.session_state.sim_data = None
@@ -256,8 +269,6 @@ if st.sidebar.button("🚀 Simülasyonu Başlat", type="primary", use_container_
             if 'Gerçek Durum' not in df_jobs.columns:
                 df_jobs['Gerçek Durum'] = np.random.choice(['Tamamlandı', 'Ertelendi'], size=len(df_jobs), p=[0.8, 0.2])
             
-            # (Hatalı sahte KM üretim bloğu kaldırıldı)
-
             # Mock Operatörler
             op_ids = [f"Op_{i+1}" for i in range(int(op_count))]
             center_lat, center_lon = df_jobs['Tesisat Enlem'].mean(), df_jobs['Tesisat Boylam'].mean()
