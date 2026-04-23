@@ -142,6 +142,31 @@ def adjust_for_lunch(arr_time):
         return TBREAK_E
     return arr_time
 
+# YENİ EKLENEN: Öncelik/Mesafe Dengeli Rotalama (Düzeltme 1)
+def _priority_nn_route(candidates, origin, coords, job_params_dict, alpha, hiz_km_dk):
+    remaining = list(candidates)
+    route = []
+    lat, lon = origin
+    urgency_map = {j: urgency_score(j, job_params_dict) for j in remaining}
+    max_urgency = max(urgency_map.values()) if urgency_map else 1.0
+
+    while remaining:
+        dists = [dist_km(lat, lon, coords[j][0], coords[j][1]) for j in remaining]
+        max_dist = max(dists) if dists else 1.0
+
+        idx = min(
+            range(len(remaining)),
+            key=lambda i: (
+                alpha * (dists[i] / (max_dist + 1e-9))
+                - (1 - alpha) * (urgency_map[remaining[i]] / (max_urgency + 1e-9))
+            )
+        )
+        j = remaining.pop(idx)
+        route.append(j)
+        lat, lon = coords[j]
+    return route
+
+# GÜNCELLENEN: Yapılamayan işlerde zaman ilerletilmiyor (Düzeltme 2)
 def _check_feasible(route, origin, coords, hiz_km_dk):
     served, unserved = [], []
     lat, lon = origin
@@ -150,35 +175,58 @@ def _check_feasible(route, origin, coords, hiz_km_dk):
         jlat, jlon = coords[j]
         travel = dist_km(lat, lon, jlat, jlon) / hiz_km_dk
         arr = adjust_for_lunch(t + travel)
-        if arr + S_i > TEND: unserved.append(j)
+        if arr + S_i > TEND: 
+            unserved.append(j)
         else:
             served.append(j)
             lat, lon = jlat, jlon
             t = arr + S_i
     return served, unserved
 
-def greedy_select_and_route(op_id, origin, job_list, coords, job_params_dict, hiz_km_dk, yakit_tl_km):
+# YENİ EKLENEN: Two-Opt Optimizasyonu
+def _two_opt(route, origin, coords, hiz_km_dk):
+    best = list(route)
+    def route_km(r):
+        lat, lon = origin
+        km = 0.0
+        for j in r:
+            jlat, jlon = coords[j]
+            km += dist_km(lat, lon, jlat, jlon)
+            lat, lon = jlat, jlon
+        return km
+
+    improved = True
+    while improved:
+        improved = False
+        for i in range(len(best) - 1):
+            for j in range(i + 2, len(best)):
+                candidate = best[:i] + best[i:j + 1][::-1] + best[j + 1:]
+                served_c, _ = _check_feasible(candidate, origin, coords, hiz_km_dk)
+                if len(served_c) == len(best) and route_km(candidate) < route_km(best) - 0.001:
+                    best = candidate
+                    improved = True
+    return best
+
+def greedy_select_and_route(op_id, origin, job_list, coords, job_params_dict, hiz_km_dk, yakit_tl_km, alpha):
     olat, olon = origin
-    sorted_by_penalty = sorted(job_list, key=lambda j: unserved_penalty(j, job_params_dict), reverse=True)
+    # GÜNCELLENEN: unserved_penalty yerine urgency_score (Düzeltme 3)
+    sorted_by_urgency = sorted(job_list, key=lambda j: urgency_score(j, job_params_dict), reverse=True)
     candidates, elenen_erken = [], []
     t_kalan = TEND - T0
     
-    for j in sorted_by_penalty:
+    for j in sorted_by_urgency:
         jlat, jlon = coords[j]
         tek_yol_dk = dist_km(olat, olon, jlat, jlon) / hiz_km_dk
         if tek_yol_dk + S_i <= t_kalan: candidates.append(j)
         else: elenen_erken.append(j)
 
-    remaining, route = list(candidates), []
-    lat, lon = origin
-    while remaining:
-        idx = min(range(len(remaining)), key=lambda i: dist_km(lat, lon, coords[remaining[i]][0], coords[remaining[i]][1]))
-        j = remaining.pop(idx)
-        route.append(j)
-        lat, lon = coords[j]
-
-    final_served, elenen_nn = _check_feasible(route, origin, coords, hiz_km_dk)
-    unserved = elenen_erken + elenen_nn
+    nn_route = _priority_nn_route(candidates, origin, coords, job_params_dict, alpha, hiz_km_dk)
+    served_nn, elenen_nn = _check_feasible(nn_route, origin, coords, hiz_km_dk)
+    route = _two_opt(served_nn, origin, coords, hiz_km_dk)
+    final_served, elenen_2opt = _check_feasible(route, origin, coords, hiz_km_dk)
+    route = final_served
+    
+    unserved = elenen_erken + elenen_nn + elenen_2opt
 
     schedule = {}
     lat, lon = olat, olon
@@ -211,7 +259,7 @@ def greedy_select_and_route(op_id, origin, job_list, coords, job_params_dict, hi
             'late': False, 'fuel_cost': 0.0, 'fixed_pen': 0.0, 'tardy_pen': 0.0,
             'unserved_pen': p_u
         }
-    return final_served, schedule, unserved
+    return route, schedule, unserved
 
 def build_folium_map(all_routes, all_schedules, op_coords, coords, job_meta):
     all_lats = [v[0] for v in coords.values()] + [v[0] for v in op_coords.values()]
@@ -246,12 +294,17 @@ def build_folium_map(all_routes, all_schedules, op_coords, coords, job_meta):
 
 # --- STREAMLIT ARAYÜZÜ ---
 st.title("⚡ EnerjiSA Operatör Rotalama Sistemi")
-st.markdown("Algoritma: K-Means Kümeleme + Greedy Optimizasyon Modeli")
+st.markdown("Algoritma: K-Means + Dinamik Öncelik/Mesafe Optimizasyonu")
 
 with st.sidebar:
     st.header("⚙️ Model Parametreleri")
     hiz_km_dk = st.slider("Ortalama Hız (km/dk)", min_value=0.1, max_value=1.5, value=0.5, step=0.1)
     yakit_tl_km = st.number_input("Yakıt Maliyeti (TL/km)", value=5.0, step=0.5)
+    
+    st.divider()
+    st.markdown("**Strateji Ayarı (Alpha)**")
+    alpha_ayar = st.slider("Öncelik ↔ Mesafe Dengesi", min_value=0.0, max_value=1.0, value=0.5, step=0.1, help="0: Sadece Aciliyete bakar (Dağınık rota olabilir). 1: Sadece Yakındakine gider (Cezalar artabilir). 0.5: En iyi denge.")
+    
     st.divider()
     uploaded_file = st.file_uploader("Veri Setini Yükle (Excel)", type=["xlsx"])
     baslat_btn = st.button("🚀 Rotalamayı Başlat", use_container_width=True)
@@ -303,7 +356,7 @@ if uploaded_file and baslat_btn:
 
             all_routes, all_schedules = {}, {}
             for op_id in op_ids:
-                route, schedule, unserved = greedy_select_and_route(op_id, op_coords[op_id], op_jobs[op_id], coords, job_params, hiz_km_dk, yakit_tl_km)
+                route, schedule, unserved = greedy_select_and_route(op_id, op_coords[op_id], op_jobs[op_id], coords, job_params, hiz_km_dk, yakit_tl_km, alpha_ayar)
                 all_routes[op_id] = route
                 all_schedules[op_id] = schedule
 
