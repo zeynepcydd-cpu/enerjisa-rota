@@ -29,7 +29,7 @@ warnings.filterwarnings("ignore")
 # ==========================================
 # 1. ARAYÜZ VE SİDEBAR AYARLARI
 # ==========================================
-st.set_page_config(page_title="EnerjiSA Rotalama", layout="wide")
+
 
 st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/4/41/Enerjisa_logo.png", width=150)
 st.sidebar.header("⚙️ Kontrol Paneli")
