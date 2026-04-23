@@ -201,7 +201,6 @@ def build_map(all_routes, all_schedules, op_coords, coords):
     m = folium.Map(location=center, zoom_start=11)
     COLORS = ['blue', 'red', 'green', 'purple', 'orange', 'darkred', 'cadetblue', 'darkblue']
     
-    # Çizgiler ve Tamamlanan İşler
     for idx, (op_id, route) in enumerate(all_routes.items()):
         color = COLORS[idx % len(COLORS)]
         olat, olon = op_coords[op_id]
@@ -212,13 +211,12 @@ def build_map(all_routes, all_schedules, op_coords, coords):
             for j in route:
                 folium.CircleMarker([coords[j][0], coords[j][1]], radius=6, color=color, fill=True, popup=f"Tamamlandı: {j}").add_to(m)
     
-    # Ertelenen Gri İşler (Unserved)
     for op_id, sch in all_schedules.items():
         for j, s in sch.items():
             if not s['served']:
                 folium.CircleMarker(
                     [coords[j][0], coords[j][1]], radius=5, color='gray', fill=True, fill_opacity=0.7,
-                    popup=f"Ertellendi: {j} (Zaman yetmedi)"
+                    popup=f"Ertelendi: {j} (Zaman yetmedi)"
                 ).add_to(m)
     return m
 
@@ -227,20 +225,17 @@ def build_map(all_routes, all_schedules, op_coords, coords):
 # ==========================================
 st.title("⚡ EnerjiSA Dinamik Rotalama Panosu")
 
-# --- EN ÜST AÇIKLAMA BÖLÜMÜ BAŞLANGICI ---
 st.markdown("""
 ### ℹ️ Optimizasyon Algoritmaları ve Çalışma Mantığı
 Bu sistem, sahadaki arıza, kesme-açma ve bakım işlerinin en verimli şekilde dağıtılması için aşağıdaki algoritmik yaklaşımları kullanmaktadır:
 
-* **1. İş Ataması (Clustering & Assignment):** Sahadaki bekleyen işler öncelikle coğrafi konumlarına göre **K-Means Kümeleme (K-Means++)** algoritması ile operatör sayısı kadar bölgeye ayrılır. Ardından, kümelerin merkez noktaları ile operatörlerin başlangıç konumları arasındaki uzaklıklar üzerinden bir maliyet matrisi oluşturulur ve **Macar Algoritması (Hungarian Algorithm / Linear Sum Assignment)** kullanılarak kümeler operatörlere optimum (en düşük maliyetli) şekilde atanır.
-* **2. İş Yükü Dengeleme (Workload Balancing):** İlk atamalardan sonra, bazı operatörlerin toplam iş süresi mesai sınırını aşabilir. Bunu çözmek için **İteratif Sezgisel (Heuristic) Yük Kaydırma** algoritması devreye girer. Aşırı yüklü operatörlerin listesindeki en düşük öncelikli işler, mesai kapasitesi müsait olan ve konuma en yakın (maks. 2 km) komşu operatörlere devredilerek iş yükü dengelenir.
-* **3. Rotalama (Routing):** Her operatörün iş listesi netleştikten sonra, rota dizilimi **Öncelik Ağırlıklı En Yakın Komşu (Priority-based Nearest Neighbor)** algoritmasıyla oluşturulur (Mesafe ve iş önceliği/cezası Alpha parametresiyle dengelenir). Oluşan bu ilk rota, hat üzerindeki çapraz kesişmeleri gidermek ve toplam kat edilen kilometreyi minimize etmek amacıyla **2-Opt Yerel Arama (Local Search)** algoritması ile optimize edilir.
-* **4. Fizibilite ve Erteleme (Feasibility & Postponement):** Rota üzerinde sırayla **Zaman Çizelgesi Simülasyonu** işletilir. Operatörün hızı, her iş için ayrılan servis süresi (10 dk) ve öğle molası (12:00-13:30) dinamik olarak hesaplanır. Matematiksel olarak mesai bitiminden (18:00) önce tamamlanamayacağı (infeasible) tespit edilen işler sıradan çıkarılır. Bu ertelenen işler, "Yaşlandırma Katsayısı (Aging)" ile cezası katlanmış şekilde ertesi günün bekleyen kuyruğuna aktarılır.
+* **1. İş Ataması (Clustering & Assignment):** Sahadaki bekleyen işler öncelikle coğrafi konumlarına göre **K-Means Kümeleme (K-Means++)** algoritması ile operatör sayısı kadar bölgeye ayrılır. Ardından **Macar Algoritması** kullanılarak kümeler operatörlere optimum şekilde atanır.
+* **2. İş Yükü Dengeleme (Workload Balancing):** Aşırı yüklü operatörlerin listesindeki en düşük öncelikli işler, mesai kapasitesi müsait olan komşu operatörlere devredilir.
+* **3. Rotalama (Routing):** **Öncelik Ağırlıklı En Yakın Komşu** algoritmasıyla oluşturulan ilk rota, **2-Opt Yerel Arama** algoritması ile çapraz kesişmelerden arındırılır.
+* **4. Fizibilite ve Erteleme (Feasibility & Postponement):** Matematiksel olarak mesai bitiminden önce tamamlanamayacağı tespit edilen işler ertelenir ve "Yaşlandırma Katsayısı (Aging)" ile cezası katlanmış şekilde ertesi güne bırakılır.
 ---
 """)
-# --- EN ÜST AÇIKLAMA BÖLÜMÜ BİTİŞİ ---
 
-# Session state hazırlıkları
 if "sim_data" not in st.session_state:
     st.session_state.sim_data = None
     st.session_state.gunler = []
@@ -259,13 +254,23 @@ if st.sidebar.button("🚀 Simülasyonu Başlat", type="primary", use_container_
             df_jobs['Tesisat Boylam'] = pd.to_numeric(df_jobs['Tesisat Boylam'].astype(str).str.replace(',', '.'), errors='coerce')
             df_jobs = df_jobs.dropna(subset=['Tesisat Enlem', 'Tesisat Boylam']).reset_index(drop=True)
             
+            # DİNAMİK TARİH OKUMA KISMI (GÜNCELLENDİ)
             tarih_col = next((c for c in df_jobs.columns if 'Planlanan' in c or 'Tarih' in c), None)
-            if tarih_col: df_jobs[tarih_col] = df_jobs[tarih_col].astype(str).str.strip().str[:10]
+            if tarih_col: 
+                df_jobs[tarih_col] = df_jobs[tarih_col].astype(str).str.strip().str[:10]
+                # Yıla bakmaksızın tüm benzersiz tarihleri al ve "nan" olanları temizle
+                gunler = sorted([str(d) for d in df_jobs[tarih_col].unique() if str(d).lower() != 'nan' and len(str(d)) > 4])
+                
+                # Eğer tarih sütunu bulundu ama içi tamamen boşsa:
+                if not gunler:
+                    df_jobs[tarih_col] = 'Tek Günlük Veri'
+                    gunler = ['Tek Günlük Veri']
             else: 
-                df_jobs['Planlanan Tarih'] = '24.11.2025'
+                df_jobs['Planlanan Tarih'] = 'Tek Günlük Veri'
                 tarih_col = 'Planlanan Tarih'
+                gunler = ['Tek Günlük Veri']
 
-            # --- GERÇEK VERİ KONTROLÜ VE MOCK ÜRETİMİ ---
+            # Gerçek Veri Mock Üretimi
             if 'Gerçek Durum' not in df_jobs.columns:
                 df_jobs['Gerçek Durum'] = np.random.choice(['Tamamlandı', 'Ertelendi'], size=len(df_jobs), p=[0.8, 0.2])
             
@@ -277,9 +282,6 @@ if st.sidebar.button("🚀 Simülasyonu Başlat", type="primary", use_container_
 
             coords = {r['Sipariş No']: (float(r['Tesisat Enlem']), float(r['Tesisat Boylam'])) for _, r in df_jobs.iterrows()}
             job_params = {row['Sipariş No']: job_cost_params(row) for _, row in df_jobs.iterrows()}
-            
-            gunler = sorted([d for d in df_jobs[tarih_col].unique() if '2025' in d or '2026' in d])
-            if not gunler: gunler = ['24.11.2025']
             
             gecikme_takip = {jid: {'ilk_planlanan': '', 'tamamlandi_gun': 'Tamamlanmadı', 'gecikme_gun_sayisi': 0, 'durum': 'Bekliyor'} for jid in coords.keys()}
             bekleyen_kuyruk = []
@@ -350,7 +352,6 @@ if st.sidebar.button("🚀 Simülasyonu Başlat", type="primary", use_container_
                 gercek_tamamlanan = len(gunluk_gercek_isler[gunluk_gercek_isler['Gerçek Durum'] == 'Tamamlandı'])
                 gercek_ertelenen = len(gunluk_gercek_isler) - gercek_tamamlanan
                 
-                # KM HESAPLAMASINDAKİ DÜZELTME
                 if 'Gerçekleşen KM' in gunluk_gercek_isler.columns:
                     arac_col = next((c for c in gunluk_gercek_isler.columns if 'Araç' in c or 'Operatör' in c or 'Plaka' in c), None)
                     if arac_col:
@@ -375,7 +376,6 @@ if st.sidebar.button("🚀 Simülasyonu Başlat", type="primary", use_container_
                 
                 progress_bar.progress((gun_idx + 1) / len(gunler))
             
-            # Verileri UI için Session'a kaydet
             gecikme_df = pd.DataFrame.from_dict(gecikme_takip, orient='index').reset_index().rename(columns={'index': 'Sipariş No'})
             st.session_state.gecikme_df = gecikme_df[gecikme_df['ilk_planlanan'] != '']
             st.session_state.sim_data = daily_results
@@ -390,9 +390,15 @@ if st.session_state.sim_data:
     st.success("Optimizasyon Başarıyla Tamamlandı!")
     st.markdown("---")
     
-    # GÜN SEÇİCİ (SLIDER)
     st.markdown("### 🗺️ Günlük Rota Haritası")
-    selected_day = st.select_slider("Görüntülemek istediğiniz günü kaydırarak seçin:", options=st.session_state.gunler)
+    
+    # GÜN SEÇİCİ KONTROLÜ (GÜNCELLENDİ)
+    # Eğer veri setinde 1'den fazla gün varsa kaydırıcı göster, aksi takdirde direkt günü seçili kabul et.
+    if len(st.session_state.gunler) > 1:
+        selected_day = st.select_slider("Görüntülemek istediğiniz günü kaydırarak seçin:", options=st.session_state.gunler)
+    else:
+        selected_day = st.session_state.gunler[0]
+        st.info(f"📅 Yüklenen veri setinde sadece tek bir gün bulunduğu için **{selected_day}** tarihi görüntüleniyor.")
     
     day_data = st.session_state.sim_data[selected_day]
     
@@ -403,7 +409,6 @@ if st.session_state.sim_data:
     # GÜNLÜK ANALİZ: SİMÜLASYON VS GERÇEK
     st.markdown(f"#### 📊 {selected_day} - Simülasyon vs Gerçekleşen Karşılaştırması")
     
-    # Fark Hesaplamaları
     sim_km = day_data['km']
     gercek_km = day_data['gercek_km']
     km_fark = sim_km - gercek_km 
@@ -418,7 +423,6 @@ if st.session_state.sim_data:
 
     col1, col2, col3 = st.columns(3)
     
-    # delta_color="inverse" parametresi, değerin DÜŞMESİNİN iyi bir şey olduğunu belirtir (Yeşil ok aşağı gösterir).
     col1.metric(
         label="Toplam Araç Mesafesi (Simülasyon)", 
         value=f"{sim_km:.1f} km", 
@@ -426,7 +430,6 @@ if st.session_state.sim_data:
         delta_color="inverse" 
     )
     
-    # delta_color="normal" parametresi, değerin ARTMASININ iyi bir şey olduğunu belirtir.
     col2.metric(
         label="Tamamlanan İş (Simülasyon)", 
         value=f"{sim_tamam} Adet", 
@@ -441,7 +444,6 @@ if st.session_state.sim_data:
         delta_color="inverse"
     )
 
-    # Özet Bilgi Kutusu
     st.info(f"💡 **Sahadaki Gerçek Durum ({selected_day}):** Gerçekte toplam **{gercek_km:.1f} km** yol yapılmış, **{gercek_tamam}** iş kapatılmış ve **{gercek_ertelenen}** iş ertesi güne bırakılmıştı.")
     
     st.markdown("---")
@@ -461,7 +463,6 @@ if st.session_state.sim_data:
     scol3.metric("Gecikmeli Biten", gec_kalan)
     scol4.metric("Simülasyon Sonu Bekleyen", yapilamayan)
     
-    # Excel Download Butonu
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, sheet_name='Gecikme Panosu', index=False)
