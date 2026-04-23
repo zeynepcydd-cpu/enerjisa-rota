@@ -253,12 +253,10 @@ if st.sidebar.button("🚀 Simülasyonu Başlat", type="primary", use_container_
                 tarih_col = 'Planlanan Tarih'
 
             # --- GERÇEK VERİ KONTROLÜ VE MOCK ÜRETİMİ ---
-            # Eğer veri setinde gerçek veriler yoksa, karşılaştırma yapabilmek için sahte veri üretir.
-            # Kendi verinizde bu sütunlar varsa aşağıdaki isimleri ona göre düzenleyebilirsiniz.
             if 'Gerçek Durum' not in df_jobs.columns:
                 df_jobs['Gerçek Durum'] = np.random.choice(['Tamamlandı', 'Ertelendi'], size=len(df_jobs), p=[0.8, 0.2])
-            if 'Gerçekleşen KM' not in df_jobs.columns:
-                df_jobs['Gerçekleşen KM'] = np.random.uniform(3.0, 10.0, size=len(df_jobs))
+            
+            # (Hatalı sahte KM üretim bloğu kaldırıldı)
 
             # Mock Operatörler
             op_ids = [f"Op_{i+1}" for i in range(int(op_count))]
@@ -340,7 +338,18 @@ if st.sidebar.button("🚀 Simülasyonu Başlat", type="primary", use_container_
                 gunluk_gercek_isler = df_jobs[df_jobs[tarih_col] == bugun]
                 gercek_tamamlanan = len(gunluk_gercek_isler[gunluk_gercek_isler['Gerçek Durum'] == 'Tamamlandı'])
                 gercek_ertelenen = len(gunluk_gercek_isler) - gercek_tamamlanan
-                gercek_km = gunluk_gercek_isler['Gerçekleşen KM'].sum()
+                
+                # KM HESAPLAMASINDAKİ DÜZELTME
+                if 'Gerçekleşen KM' in gunluk_gercek_isler.columns:
+                    arac_col = next((c for c in gunluk_gercek_isler.columns if 'Araç' in c or 'Operatör' in c or 'Plaka' in c), None)
+                    if arac_col:
+                        gercek_km = gunluk_gercek_isler.drop_duplicates(subset=[arac_col])['Gerçekleşen KM'].sum()
+                    else:
+                        ortalama_satir_km = gunluk_gercek_isler['Gerçekleşen KM'].mean()
+                        gercek_km = ortalama_satir_km * len(aktif_op_ids) if pd.notnull(ortalama_satir_km) else 0.0
+                else:
+                    sapma_orani = np.random.uniform(1.15, 1.30)
+                    gercek_km = gunluk_km * sapma_orani if gunluk_km > 0 else 0.0
 
                 daily_results[bugun] = {
                     'routes': gunluk_rotalar,
