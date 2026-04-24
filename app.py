@@ -70,14 +70,14 @@ def dist_km(lat1, lon1, lat2, lon2):
     return math.sqrt(((lat1 - lat2) * 111) ** 2 + ((lon1 - lon2) * 83) ** 2)
 
 def job_cost_params(row):
-    ist      = str(row.get('Sipariş Türü', '')).upper()[:2]
-    abon     = str(row.get('Abonelik Türü', ''))
+    ist       = str(row.get('Sipariş Türü', '')).upper()[:2]
+    abon      = str(row.get('Abonelik Türü', ''))
     is_ticari = 'ticarethane' in abon.lower()
-    c_d      = C_TICARI if is_ticari else C_MESKEN
-    pi_i     = PI.get(ist, PI_DEFAULT)
-    if ist in PENALTI_TUR:   p_u = c_d
-    elif ist in RISKY_TUR:   p_u = c_d * 0.5
-    else:                    p_u = 50.0
+    c_d       = C_TICARI if is_ticari else C_MESKEN
+    pi_i      = PI.get(ist, PI_DEFAULT)
+    if ist in PENALTI_TUR:  p_u = c_d
+    elif ist in RISKY_TUR:  p_u = c_d * 0.5
+    else:                   p_u = 50.0
     return c_d, pi_i, p_u, TEND
 
 def urgency_score(job_id, job_params_dict):
@@ -86,6 +86,70 @@ def urgency_score(job_id, job_params_dict):
 
 def unserved_penalty(job_id, job_params_dict):
     return job_params_dict[job_id][2]
+
+def get_job_type(job_id, job_type_map):
+    """İş türünün ilk 2 harfini döndürür."""
+    return str(job_type_map.get(job_id, '')).upper()[:2]
+
+# ==========================================
+# YENİ FONKSİYON: ZB ÖNCELİKLENDİRME
+# ==========================================
+def boost_zb_priority(op_jobs, job_params_dict, job_type_map, zb_target):
+    """
+    ZB hedefini sağlamak için her operatörün iş listesindeki
+    ZB işlerinin urgency skorunu geçici olarak yükseltir.
+
+    Mantık:
+    - Tüm ZB işlerinin kaç tanesi hedefi karşılamak için tamamlanmalı?
+    - O kadar ZB işini, en yüksek urgency skorlu iş kadar yüksek bir
+      score'a çıkar. Böylece rotalama sırasında önce seçilirler.
+    """
+    if zb_target <= 0:
+        return job_params_dict  # hedef 0 ise dokunma
+
+    # Tüm ZB işlerini bul
+    tum_zb = [
+        jid for op_list in op_jobs.values()
+        for jid in op_list
+        if get_job_type(jid, job_type_map) == 'ZB'
+    ]
+
+    if not tum_zb:
+        return job_params_dict
+
+    # Hedef adede göre kaç ZB tamamlanmalı
+    zb_hedef_adet = math.ceil(len(tum_zb) * zb_target)
+
+    # Mevcut en yüksek urgency skorunu bul (ZB dışı işlerden)
+    zb_olmayan = [
+        jid for op_list in op_jobs.values()
+        for jid in op_list
+        if get_job_type(jid, job_type_map) != 'ZB'
+    ]
+    max_non_zb_score = max(
+        (urgency_score(j, job_params_dict) for j in zb_olmayan),
+        default=C_MESKEN
+    )
+
+    # ZB işlerini urgency skoruna göre sırala (yüksekten düşüğe)
+    # ve ilk zb_hedef_adet tanesinin p_u'sunu boost et
+    zb_sirali = sorted(
+        tum_zb,
+        key=lambda j: urgency_score(j, job_params_dict),
+        reverse=True
+    )
+    zb_boost_listesi = set(zb_sirali[:zb_hedef_adet])
+
+    # Boost edilmiş parametreleri yeni dict'e koy
+    boosted_params = dict(job_params_dict)
+    for jid in zb_boost_listesi:
+        c_d, pi_i, p_u, b_i = boosted_params[jid]
+        # p_u'yu en yüksek non-ZB skoru + küçük bir epsilon kadar yükselt
+        # Böylece bu ZB işleri öncelik sıralamasında öne geçer
+        yeni_p_u = max_non_zb_score / (1.0 + pi_i) + 1.0
+        boosted_params[jid] = (c_d, pi_i, yeni_p_u, b_i)
+
+    return boosted_params
 
 def teorik_sure(op_coord, job_list, coords):
     if not job_list:
@@ -144,7 +208,6 @@ def adjust_for_lunch(arr_time):
         return TBREAK_E
     return arr_time
 
-# DÜZELTME: yapılamayan işte konum/zaman GÜNCELLENMİYOR
 def _check_feasible(route, origin, coords):
     served, unserved = [], []
     lat, lon, t = origin[0], origin[1], T0
@@ -207,10 +270,10 @@ def greedy_select_and_route(op_id, origin, job_list, coords, job_params_dict, al
         else:
             elenen_erken.append(j)
 
-    nn_route  = _priority_nn_route(candidates, origin, coords, job_params_dict, alpha)
+    nn_route          = _priority_nn_route(candidates, origin, coords, job_params_dict, alpha)
     served_nn, elenen_nn = _check_feasible(nn_route, origin, coords)
-    route = _check_feasible(_two_opt(served_nn, origin, coords), origin, coords)[0]
-    unserved = elenen_erken + elenen_nn + [j for j in served_nn if j not in route]
+    route             = _check_feasible(_two_opt(served_nn, origin, coords), origin, coords)[0]
+    unserved          = elenen_erken + elenen_nn + [j for j in served_nn if j not in route]
 
     schedule, cur_time, lat, lon = {}, T0, olat, olon
     for j in route:
@@ -240,8 +303,7 @@ def build_map(all_routes, all_schedules, op_coords, coords):
     center = (np.mean([v[0] for v in coords.values()]),
               np.mean([v[1] for v in coords.values()]))
     m = folium.Map(location=center, zoom_start=11)
-    COLORS = ['blue', 'red', 'green', 'purple', 'orange',
-              'darkred', 'cadetblue', 'darkblue']
+    COLORS = ['blue', 'red', 'green', 'purple', 'orange', 'darkred', 'cadetblue', 'darkblue']
 
     for idx, (op_id, route) in enumerate(all_routes.items()):
         color      = COLORS[idx % len(COLORS)]
@@ -280,16 +342,17 @@ Bu sistem, sahadaki arıza, kesme-açma ve bakım işlerinin en verimli şekilde
 aşağıdaki algoritmik yaklaşımları kullanmaktadır:
 
 * **1. İş Ataması (Clustering & Assignment):** İşler coğrafi konumlarına göre **K-Means Kümeleme (K-Means++)** algoritması ile operatör sayısı kadar bölgeye ayrılır. Ardından **Macar Algoritması** kullanılarak kümeler operatörlere optimum şekilde atanır.
-* **2. İş Yükü Dengeleme (Workload Balancing):** Aşırı yüklü operatörlerin en düşük öncelikli işleri, kapasitesi uygun ve konuma en yakın komşu operatörlere devredilir.
-* **3. Rotalama (Routing):** **Öncelik Ağırlıklı En Yakın Komşu** algoritmasıyla oluşturulan ilk rota, çapraz kesişmeleri gidermek için **2-Opt Yerel Arama** ile optimize edilir.
-* **4. Fizibilite ve Erteleme:** Mesai bitimine kadar tamamlanamayacak işler sıradan çıkarılır. Ertelenen işler "Yaşlandırma Katsayısı" ile cezası artırılmış şekilde bir sonraki güne aktarılır.
+* **2. ZB Önceliklendirme:** Rotalama başlamadan önce, ZB hedefini sağlayacak kadar ZB işinin öncelik puanı geçici olarak yükseltilir. Bu sayede rota algoritması bu işleri önce seçer.
+* **3. İş Yükü Dengeleme (Workload Balancing):** Aşırı yüklü operatörlerin en düşük öncelikli işleri, kapasitesi uygun ve konuma en yakın komşu operatörlere devredilir.
+* **4. Rotalama (Routing):** **Öncelik Ağırlıklı En Yakın Komşu** algoritmasıyla oluşturulan ilk rota, çapraz kesişmeleri gidermek için **2-Opt Yerel Arama** ile optimize edilir.
+* **5. Fizibilite ve Erteleme:** Mesai bitimine kadar tamamlanamayacak işler sıradan çıkarılır. Ertelenen işler "Yaşlandırma Katsayısı" ile cezası artırılmış şekilde bir sonraki güne aktarılır.
 ---
 """)
 
 if "sim_data" not in st.session_state:
-    st.session_state.sim_data  = None
-    st.session_state.gunler    = []
-    st.session_state.mod       = None   # "gunluk" | "haftalik"
+    st.session_state.sim_data = None
+    st.session_state.gunler   = []
+    st.session_state.mod      = None
 
 if st.sidebar.button("🚀 Simülasyonu Başlat", type="primary", use_container_width=True):
     if uploaded_file is None:
@@ -307,7 +370,9 @@ if st.sidebar.button("🚀 Simülasyonu Başlat", type="primary", use_container_
                 df_jobs['Tesisat Enlem'].astype(str).str.replace(',', '.'), errors='coerce')
             df_jobs['Tesisat Boylam'] = pd.to_numeric(
                 df_jobs['Tesisat Boylam'].astype(str).str.replace(',', '.'), errors='coerce')
-            df_jobs = df_jobs.dropna(subset=['Tesisat Enlem', 'Tesisat Boylam']).reset_index(drop=True)
+            df_jobs = df_jobs.dropna(
+                subset=['Tesisat Enlem', 'Tesisat Boylam']
+            ).reset_index(drop=True)
 
             # ── Tarih sütunu tespiti ───────────────────────
             tarih_col = next(
@@ -319,14 +384,13 @@ if st.sidebar.button("🚀 Simülasyonu Başlat", type="primary", use_container_
                 df_jobs['Planlanan Tarih'] = '24.11.2025'
                 tarih_col = 'Planlanan Tarih'
 
-            # ── Mod tespiti: günlük mi, haftalık mı? ──────
+            # ── Mod tespiti ────────────────────────────────
             gunler = sorted([
                 d for d in df_jobs[tarih_col].unique()
                 if '2025' in d or '2026' in d
             ])
             if not gunler:
                 gunler = ['24.11.2025']
-
             mod = "gunluk" if len(gunler) == 1 else "haftalik"
 
             # ── Mock kurulum ───────────────────────────────
@@ -335,9 +399,9 @@ if st.sidebar.button("🚀 Simülasyonu Başlat", type="primary", use_container_
                     ['Tamamlandı', 'Ertelendi'], size=len(df_jobs), p=[0.8, 0.2]
                 )
 
-            op_ids      = [f"Op_{i+1}" for i in range(int(op_count))]
-            center_lat  = df_jobs['Tesisat Enlem'].mean()
-            center_lon  = df_jobs['Tesisat Boylam'].mean()
+            op_ids     = [f"Op_{i+1}" for i in range(int(op_count))]
+            center_lat = df_jobs['Tesisat Enlem'].mean()
+            center_lon = df_jobs['Tesisat Boylam'].mean()
             np.random.seed(42)
             op_coords = {
                 op: (
@@ -356,6 +420,14 @@ if st.sidebar.button("🚀 Simülasyonu Başlat", type="primary", use_container_
                 for _, row in df_jobs.iterrows()
             }
 
+            # İş türü haritası (ZB tespiti için)
+            job_type_map = {}
+            if 'Sipariş Türü' in df_jobs.columns:
+                job_type_map = dict(
+                    zip(df_jobs['Sipariş No'],
+                        df_jobs['Sipariş Türü'].astype(str).str.upper().str[:2])
+                )
+
             gecikme_takip = {
                 jid: {
                     'ilk_planlanan': '', 'tamamlandi_gun': 'Tamamlanmadı',
@@ -368,7 +440,9 @@ if st.sidebar.button("🚀 Simülasyonu Başlat", type="primary", use_container_
             progress_bar    = st.progress(0)
 
             for gun_idx, bugun in enumerate(gunler):
-                bugunun_yeni_isleri = df_jobs[df_jobs[tarih_col] == bugun]['Sipariş No'].tolist()
+                bugunun_yeni_isleri = df_jobs[
+                    df_jobs[tarih_col] == bugun
+                ]['Sipariş No'].tolist()
                 for j in bugunun_yeni_isleri:
                     gecikme_takip[j]['ilk_planlanan'] = bugun
 
@@ -406,6 +480,17 @@ if st.sidebar.button("🚀 Simülasyonu Başlat", type="primary", use_container_
                     op_jobs, aktif_op_ids, op_coords, coords, job_params
                 )
 
+                # ── ZB ÖNCELİKLENDİRME ← BURAYA EKLENDI ──────────────────────────────
+                # Rotalama başlamadan önce ZB hedefini sağlayacak kadar ZB işinin
+                # urgency skoru geçici olarak yükseltiliyor.
+                # Örnek: 10 ZB işi var, hedef %30 → 3 ZB işinin skoru en yüksek
+                # non-ZB işinin skoru kadar çıkarılıyor.
+                # Orijinal job_params değiştirilmiyor; sadece bu gün için kullanılıyor.
+                gunluk_job_params = boost_zb_priority(
+                    op_jobs, job_params, job_type_map, ZB_COVERAGE_TARGET
+                )
+                # ─────────────────────────────────────────────────────────────────────
+
                 bekleyen_kuyruk  = []
                 gunluk_rotalar   = {}
                 gunluk_schedules = {}
@@ -413,7 +498,10 @@ if st.sidebar.button("🚀 Simülasyonu Başlat", type="primary", use_container_
 
                 for op in aktif_op_ids:
                     route, schedule, unserved = greedy_select_and_route(
-                        op, op_coords[op], op_jobs[op], coords, job_params, alpha_val
+                        op, op_coords[op], op_jobs[op],
+                        coords,
+                        gunluk_job_params,   # ← boost edilmiş parametreler
+                        alpha_val
                     )
                     gunluk_rotalar[op]   = route
                     gunluk_schedules[op] = schedule
@@ -437,6 +525,22 @@ if st.sidebar.button("🚀 Simülasyonu Başlat", type="primary", use_container_
                         gecikme_takip[j]['gecikme_gun_sayisi'] += 1
                         c_d, pi_i, p_u, b_i = job_params[j]
                         job_params[j] = (c_d, pi_i, p_u * aging_val, b_i)
+
+                # ZB tamamlanma oranını hesapla (günlük)
+                tum_zb_bugun = [
+                    j for op_list in op_jobs.values()
+                    for j in op_list
+                    if get_job_type(j, job_type_map) == 'ZB'
+                ]
+                zb_tamamlanan_bugun = sum(
+                    1 for sch in gunluk_schedules.values()
+                    for j, s in sch.items()
+                    if get_job_type(j, job_type_map) == 'ZB' and s['served']
+                )
+                zb_oran_bugun = (
+                    zb_tamamlanan_bugun / len(tum_zb_bugun)
+                    if tum_zb_bugun else 1.0
+                )
 
                 # Gerçek veriler
                 gunluk_gercek_isler = df_jobs[df_jobs[tarih_col] == bugun]
@@ -470,22 +574,25 @@ if st.sidebar.button("🚀 Simülasyonu Başlat", type="primary", use_container_
                     'gercek_km': gercek_km,
                     'gercek_tamamlanan': gercek_tamamlanan,
                     'gercek_ertelenen': gercek_ertelenen,
+                    'zb_tamamlanan': zb_tamamlanan_bugun,
+                    'zb_toplam': len(tum_zb_bugun),
+                    'zb_oran': zb_oran_bugun,
                 }
 
                 progress_bar.progress((gun_idx + 1) / len(gunler))
 
-            # Session state'e kaydet
             gecikme_df = (
                 pd.DataFrame.from_dict(gecikme_takip, orient='index')
                 .reset_index()
                 .rename(columns={'index': 'Sipariş No'})
             )
-            st.session_state.gecikme_df = gecikme_df[gecikme_df['ilk_planlanan'] != '']
-            st.session_state.sim_data   = daily_results
-            st.session_state.gunler     = gunler
-            st.session_state.mod        = mod
-            st.session_state.op_coords  = op_coords
-            st.session_state.coords     = coords
+            st.session_state.gecikme_df  = gecikme_df[gecikme_df['ilk_planlanan'] != '']
+            st.session_state.sim_data    = daily_results
+            st.session_state.gunler      = gunler
+            st.session_state.mod         = mod
+            st.session_state.op_coords   = op_coords
+            st.session_state.coords      = coords
+            st.session_state.job_type_map = job_type_map
 
 # ==========================================
 # 5. GÖRSELLEŞTİRME VE ANALİZ
@@ -497,15 +604,11 @@ if st.session_state.sim_data:
     mod    = st.session_state.mod
     gunler = st.session_state.gunler
 
-    # ── GÜN SEÇİCİ: mod'a göre farklı davranır ──────────────
     st.markdown("### 🗺️ Rota Haritası")
-
     if mod == "gunluk":
-        # Tek gün: slider gösterme, sadece tarihi yaz
         selected_day = gunler[0]
         st.info(f"📅 Gösterilen tarih: **{selected_day}** (Günlük veri)")
     else:
-        # Çok gün: slider göster
         selected_day = st.select_slider(
             "Görüntülemek istediğiniz günü kaydırarak seçin:",
             options=gunler
@@ -513,7 +616,6 @@ if st.session_state.sim_data:
 
     day_data = st.session_state.sim_data[selected_day]
 
-    # Harita
     map_obj = build_map(
         day_data['routes'], day_data['schedules'],
         st.session_state.op_coords, st.session_state.coords
@@ -526,32 +628,56 @@ if st.session_state.sim_data:
         baslik = f"#### 📊 {selected_day} — Günlük Simülasyon Sonuçları"
     st.markdown(baslik)
 
-    sim_km         = day_data['km']
-    gercek_km      = day_data['gercek_km']
-    sim_tamam      = day_data['tamamlanan']
-    gercek_tamam   = day_data['gercek_tamamlanan']
-    sim_ertelenen  = day_data['ertelenen']
+    sim_km           = day_data['km']
+    gercek_km        = day_data['gercek_km']
+    sim_tamam        = day_data['tamamlanan']
+    gercek_tamam     = day_data['gercek_tamamlanan']
+    sim_ertelenen    = day_data['ertelenen']
     gercek_ertelenen = day_data['gercek_ertelenen']
+    zb_tamamlanan    = day_data['zb_tamamlanan']
+    zb_toplam        = day_data['zb_toplam']
+    zb_oran          = day_data['zb_oran']
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     col1.metric(
-        "Toplam Araç Mesafesi (Simülasyon)",
+        "Toplam Araç Mesafesi",
         f"{sim_km:.1f} km",
         delta=f"{sim_km - gercek_km:.1f} km (Gerçeğe Göre)",
         delta_color="inverse",
     )
     col2.metric(
-        "Tamamlanan İş (Simülasyon)",
+        "Tamamlanan İş",
         f"{sim_tamam} Adet",
         delta=f"{sim_tamam - gercek_tamam} Adet (Gerçeğe Göre)",
         delta_color="normal",
     )
     col3.metric(
-        "Ertelenen İş (Simülasyon)",
+        "Ertelenen İş",
         f"{sim_ertelenen} Adet",
         delta=f"{sim_ertelenen - gercek_ertelenen} Adet (Gerçeğe Göre)",
         delta_color="inverse",
     )
+    # ZB metriği: hedef tuttu mu tutmadı mı renkli göster
+    zb_hedef_adet = math.ceil(zb_toplam * ZB_COVERAGE_TARGET) if zb_toplam > 0 else 0
+    col4.metric(
+        f"ZB Tamamlama (Hedef ≥%{zb_hedef})",
+        f"{zb_tamamlanan} / {zb_toplam}",
+        delta=f"%{zb_oran*100:.1f} {'✅' if zb_oran >= ZB_COVERAGE_TARGET else '❌'}",
+        delta_color="normal" if zb_oran >= ZB_COVERAGE_TARGET else "inverse",
+    )
+
+    if zb_oran < ZB_COVERAGE_TARGET:
+        st.warning(
+            f"⚠️ ZB hedefi tutmadı: {zb_tamamlanan}/{zb_toplam} iş tamamlandı "
+            f"(%{zb_oran*100:.1f}). Hedef: %{zb_hedef}. "
+            f"En az {zb_hedef_adet} ZB işi tamamlanmalıydı. "
+            f"Alpha değerini düşürmeyi veya ZB hedefini azaltmayı deneyebilirsiniz."
+        )
+    else:
+        st.success(
+            f"✅ ZB hedefi karşılandı: {zb_tamamlanan}/{zb_toplam} ZB işi tamamlandı "
+            f"(%{zb_oran*100:.1f} ≥ %{zb_hedef})."
+        )
 
     st.info(
         f"💡 **Sahadaki Gerçek Durum ({selected_day}):** "
@@ -562,29 +688,26 @@ if st.session_state.sim_data:
 
     st.markdown("---")
 
-    # ── ÖZET: günlük modda tek günlük, haftalıkta kümülatif ──
     if mod == "gunluk":
         st.markdown("### 📋 Günlük Gecikme Analizi")
     else:
         st.markdown("### 📋 Tüm Simülasyon Boyunca Gecikme Analizi (Kümülatif)")
 
     df = st.session_state.gecikme_df
-
     toplam_is   = len(df)
     zamaninda   = len(df[df['gecikme_gun_sayisi'] == 0])
     gec_kalan   = len(df[(df['gecikme_gun_sayisi'] > 0) & (df['durum'] == 'Tamamlandı')])
     yapilamayan = len(df[df['durum'] == 'Bekliyor'])
 
     scol1, scol2, scol3, scol4 = st.columns(4)
-    scol1.metric("Toplam İş Hacmi",         toplam_is)
-    scol2.metric("Zamanında Biten",         zamaninda)
-    scol3.metric("Gecikmeli Biten",         gec_kalan)
+    scol1.metric("Toplam İş Hacmi",  toplam_is)
+    scol2.metric("Zamanında Biten",  zamaninda)
+    scol3.metric("Gecikmeli Biten",  gec_kalan)
     scol4.metric(
         "Bekleyen" if mod == "gunluk" else "Simülasyon Sonu Bekleyen",
         yapilamayan
     )
 
-    # Excel indirme
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, sheet_name='Gecikme Panosu', index=False)
