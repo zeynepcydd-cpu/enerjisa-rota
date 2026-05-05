@@ -1,11 +1,10 @@
 """
 =============================================================================
-ENERJİSA — AKILLI ROTALAMA VE DİNAMİK SİMÜLASYON SİSTEMİ (V2.0)
+ENERJİSA — ROTALAMA VE SİMÜLASYON SİSTEMİ (KARAR DESTEK ARACI)
 =============================================================================
-Yenilikler: 
-- Ertelenen/İptal gri noktalar opsiyonel (UI üzerinden aç/kapat).
-- Sahadaki Gerçekleşen vs Statik vs Dinamik detaylı karşılaştırma analizi.
-- Operatör bazlı detaylı performans tablosu.
+Açıklama: 
+Gün öncesi (Statik) ve gerçek zamanlı (Dinamik) rotalama algoritmalarını 
+çalıştırır, haritalar ve performans analizi sunar.
 """
 
 import math
@@ -26,19 +25,19 @@ warnings.filterwarnings("ignore")
 # =============================================================================
 # 1. KULLANICI ARAYÜZÜ (UI) VE SİDEBAR KONFİGÜRASYONU
 # =============================================================================
-st.set_page_config(page_title="EnerjiSA Dinamik Rotalama", layout="wide", page_icon="⚡")
+st.set_page_config(page_title="EnerjiSA Rotalama Sistemi", layout="wide", page_icon="⚡")
 
 st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/4/41/Enerjisa_logo.png", width=150)
 st.sidebar.markdown("### 🎯 Çalışma Modu")
 sim_modu = st.sidebar.radio(
     "Simülasyon Senaryosu:",
-    ["A/B Karşılaştırma Testi (Tümü)", "Sadece Dinamik Mod", "Sadece Statik Mod"],
-    help="Tüm senaryoları yan yana görmek için A/B Testini seçin."
+    ["Karşılaştırma (Statik vs Dinamik)", "Dinamik", "Statik"],
+    help="Tüm metrikleri yan yana incelemek için Karşılaştırma modunu kullanın."
 )
 
 st.sidebar.markdown("### 👁️ Harita Görünümü")
 show_unserved = st.sidebar.checkbox("Ertelenen/İptal İşleri Göster", value=False, 
-                                    help="Haritadaki gri kalabalığı açıp kapatır.")
+                                    help="Haritadaki tamamlanmamış işleri (gri noktalar) açıp kapatır.")
 
 st.sidebar.markdown("### 📂 Veri Yükleme")
 uploaded_file = st.sidebar.file_uploader("İş Verisini Yükle (Excel/CSV)", type=['csv', 'xlsx'])
@@ -68,7 +67,7 @@ RISKY_TUR = {'ZB', 'ZG', 'ZS'}
 CANCEL_STATUSES = {'IPTL', 'İPTAL', 'BŞSZ', 'KIPT', 'IPTL ODME'}
 
 # =============================================================================
-# 3. YARDIMCI FONKSİYONLAR VE MATEMATİK
+# 3. YARDIMCI FONKSİYONLAR
 # =============================================================================
 def dist_km(lat1, lon1, lat2, lon2):
     return math.sqrt(((lat1 - lat2) * 111) ** 2 + ((lon1 - lon2) * 83) ** 2)
@@ -90,7 +89,7 @@ def adjust_for_lunch(t):
     return t
 
 # =============================================================================
-# 4. ÇEKİRDEK ROTALAMA ALGORİTMALARI
+# 4. ROTALAMA ALGORİTMALARI
 # =============================================================================
 def boost_zb_priority(op_jobs, jp, df_jobs, zb_target):
     if zb_target <= 0: return jp
@@ -145,7 +144,7 @@ def greedy_route(op_id, origin, job_list, coords, jp, alpha, t_start=T0):
     return final_route, sch
 
 # =============================================================================
-# 5. DİNAMİK SİMÜLASYON MOTORU (ROLLING HORIZON)
+# 5. DİNAMİK SİMÜLASYON (ROLLING HORIZON)
 # =============================================================================
 def run_dynamic_simulation(df_jobs, op_ids, op_coords, initial_routes, initial_sch, coords, jp, freq):
     cancel_events = []
@@ -201,7 +200,7 @@ def run_dynamic_simulation(df_jobs, op_ids, op_coords, initial_routes, initial_s
     return dyn_routes, dyn_sch, cancelled_set
 
 # =============================================================================
-# 6. HARİTA GÖRSELLEŞTİRME (GRİLİKLER OPSİYONEL)
+# 6. HARİTA GÖRSELLEŞTİRME
 # =============================================================================
 def build_map(routes, schedules, op_coords, coords, cancelled=None, show_unserved=False):
     cancelled = cancelled or set()
@@ -220,7 +219,6 @@ def build_map(routes, schedules, op_coords, coords, cancelled=None, show_unserve
             for j in route:
                 folium.CircleMarker(coords[j], radius=5, color=color, fill=True, popup=f"Tamamlandı: {j}").add_to(m)
                 
-        # GRİ NOKTALAR SADECE KULLANICI İSTERSE GÖSTERİLİR
         if show_unserved:
             for j, s in schedules[op].items():
                 if not s['served']:
@@ -240,24 +238,22 @@ def get_metrics(routes, sch, op_coords, coords):
         served += sum(1 for s in s_dict.values() if s['served'])
     return km, served
 
-def extract_actual_metrics(df, job_count, op_count):
-    # Gerçek veri analizini simüle et/hesapla
+def extract_actual_metrics(df, job_count):
     gercek_tamamlanan = len(df[~df['Sipariş Durumu'].isin(CANCEL_STATUSES)]) if 'Sipariş Durumu' in df.columns else int(job_count * 0.75)
     gercek_iptal = len(df[df['Sipariş Durumu'].isin(CANCEL_STATUSES)]) if 'Sipariş Durumu' in df.columns else int(job_count * 0.15)
-    # Varsayımsal gerçek KM (statikten %20 daha kötü rotalama varsayımı)
     return gercek_tamamlanan, gercek_iptal
 
 # =============================================================================
 # 7. ANA UYGULAMA AKIŞI
 # =============================================================================
-st.title("⚡ EnerjiSA Akıllı Rotalama & Karar Destek Sistemi")
-st.markdown("Sahadan gelen iptallere anında tepki veren Dinamik Rotalama ile Gün Öncesi (Statik) Planlama karşılaştırması.")
+st.title("⚡ EnerjiSA Rotalama ve Karar Destek Sistemi")
+st.markdown("Sahadan gelen iptallere anında tepki veren Dinamik Rotalama ile Gün Öncesi (Statik) Planlama analizi.")
 
 if st.sidebar.button("🚀 Simülasyonu Çalıştır", type="primary", use_container_width=True):
     if uploaded_file is None:
         st.error("Lütfen önce sol menüden veri seti yükleyin!")
     else:
-        with st.spinner("Yapay Zeka rotaları hesaplıyor ve karşılaştırmaları hazırlıyor..."):
+        with st.spinner("Rotalar hesaplanıyor ve simülasyon hazırlanıyor..."):
             
             df = pd.read_excel(uploaded_file) if uploaded_file.name.endswith('.xlsx') else pd.read_csv(uploaded_file)
             df['Tesisat Enlem'] = pd.to_numeric(df['Tesisat Enlem'].astype(str).str.replace(',', '.'), errors='coerce')
@@ -291,28 +287,30 @@ if st.sidebar.button("🚀 Simülasyonu Çalıştır", type="primary", use_conta
                 
             boosted_jp = boost_zb_priority(op_jobs, jp, df, ZB_TARGET_RATE)
             
+            # Statik Planlama
             statik_routes, statik_sch = {}, {}
             for op in ops:
                 r, s = greedy_route(op, op_coords[op], op_jobs[op], coords, boosted_jp, alpha_val)
                 statik_routes[op] = r
                 statik_sch[op] = s
 
+            # Dinamik Planlama
             dyn_r, dyn_s, canc = run_dynamic_simulation(df, ops, op_coords, statik_routes, statik_sch, coords, jp, reopt_freq)
 
             skm, ssrv = get_metrics(statik_routes, statik_sch, op_coords, coords)
             dkm, dsrv = get_metrics(dyn_r, dyn_s, op_coords, coords)
-            g_srv, g_ipt = extract_actual_metrics(df, len(job_ids), op_count)
-            g_km = skm * 1.25 # Gerçek hayatta statikten ortalama %25 daha fazla yol yapılır
+            g_srv, g_ipt = extract_actual_metrics(df, len(job_ids))
+            g_km = skm * 1.25 # Varsayımsal gerçekleşen KM
             
             # --- SONUÇ GÖSTERİMİ ---
-            if "A/B" in sim_modu:
-                st.markdown("### 🗺️ A/B Harita Karşılaştırması")
+            if "Karşılaştırma" in sim_modu:
+                st.markdown("### 🗺️ Harita Karşılaştırması")
                 col_m1, col_m2 = st.columns(2)
                 with col_m1:
-                    st.markdown("**Statik Plan (Kör Uçuş)**")
+                    st.markdown("**Statik Plan (Sabit Rota)**")
                     components.html(build_map(statik_routes, statik_sch, op_coords, coords, show_unserved=show_unserved)._repr_html_(), height=450)
                 with col_m2:
-                    st.markdown("**Dinamik Plan (Gerçek Zamanlı İptal Yönetimi)**")
+                    st.markdown("**Dinamik Plan (Güncellenen Rota)**")
                     components.html(build_map(dyn_r, dyn_s, op_coords, coords, canc, show_unserved=show_unserved)._repr_html_(), height=450)
 
             elif "Dinamik" in sim_modu:
@@ -323,32 +321,26 @@ if st.sidebar.button("🚀 Simülasyonu Çalıştır", type="primary", use_conta
                 components.html(build_map(statik_routes, statik_sch, op_coords, coords, show_unserved=show_unserved)._repr_html_(), height=550)
 
             st.markdown("---")
-            st.markdown("### 📊 Sahadaki Gerçek Durum vs Algoritma Analizi")
-            st.markdown("Aşağıdaki tabloda, sahadaki geçmiş gerçekleşen veriler ile Yapay Zeka'nın statik ve dinamik planlarının detaylı karşılaştırmasını görebilirsiniz.")
-
-            # Özet Metrik Kartları
+            st.markdown("### 📊 Analiz ve Performans Metrikleri")
+            
             c1, c2, c3 = st.columns(3)
-            c1.metric("Sahadaki Gerçek KM (Tahmini)", f"{g_km:.1f} km")
-            c2.metric("Statik Model KM", f"{skm:.1f} km", delta=f"{skm - g_km:.1f} km (Gerçeğe Göre)", delta_color="inverse")
-            c3.metric("Dinamik Model KM", f"{dkm:.1f} km", delta=f"{dkm - skm:.1f} km (Statiğe Göre)", delta_color="inverse")
+            c1.metric("Tahmini Gerçekleşen KM", f"{g_km:.1f} km")
+            c2.metric("Statik Model KM", f"{skm:.1f} km", delta=f"{skm - g_km:.1f} km", delta_color="inverse")
+            c3.metric("Dinamik Model KM", f"{dkm:.1f} km", delta=f"{dkm - skm:.1f} km", delta_color="inverse")
 
-            # Detaylı Operatör Tablosu (Dataframe)
-            st.markdown("#### 🧑‍🔧 Operatör Bazlı Performans Detayları")
+            st.markdown("#### 🧑‍🔧 Operatör Performans Tablosu")
             op_data = []
             for op in ops:
-                op_skm = sum(dist_km(op_coords[op][0], op_coords[op][1], coords[statik_routes[op][0]][0], coords[statik_routes[op][0]][1]) for i in range(1)) if statik_routes[op] else 0 # Simplified
-                # Gerçek KM hesaplamasını operatore dağıtıyoruz
-                op_dkm = sum(dist_km(op_coords[op][0], op_coords[op][1], coords[dyn_r[op][0]][0], coords[dyn_r[op][0]][1]) for i in range(1)) if dyn_r[op] else 0
-                
                 op_data.append({
                     "Operatör": op,
-                    "Planlanan İş": len(op_jobs[op]),
-                    "Statik Tamamlanan": sum(1 for s in statik_sch[op].values() if s['served']),
-                    "Dinamik Tamamlanan": sum(1 for s in dyn_s[op].values() if s['served']),
+                    "Atanan İş (Başlangıç)": len(op_jobs[op]),
+                    "Statik Servis": sum(1 for s in statik_sch[op].values() if s['served']),
+                    "Dinamik Servis": sum(1 for s in dyn_s[op].values() if s['served']),
                     "Yoldayken İptal Edilen": sum(1 for j in canc if j in dyn_s[op]),
                 })
             
             df_ops = pd.DataFrame(op_data)
             st.dataframe(df_ops, use_container_width=True, hide_index=True)
             
-            st.success(f"💡 **Analiz Çıktısı:** Dinamik model kullanılarak, statik (sabit) plana göre **{ssrv - dsrv} adet iptal işe boşuna gidilmesinin önüne geçildi** ve toplamda **{(skm - dkm):.1f} km** daha az mesafe kat edildi.")
+            if "Karşılaştırma" in sim_modu or "Dinamik" in sim_modu:
+                st.info(f"💡 **Sonuç:** Dinamik model ile statik plana kıyasla toplam **{(skm - dkm):.1f} km** daha az mesafe kat edilmiş ve sahadaki değişikliklere gerçek zamanlı uyum sağlanmıştır.")
