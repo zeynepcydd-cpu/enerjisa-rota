@@ -782,7 +782,13 @@ if fmt=='weekly':
                              'cancelled':len(cancelled),'n_carry':len(set(pool_ids)-today_pre),
                              'n_pre':len(today_pre),'n_in':len(arrival_ev_today),
                              'n_ops':len(used_ops),'vpi':vpi_row,
-                             'carryover_n':len(carryover)})
+                             'carryover_n':len(carryover),
+                             'op_metrics':{
+                                 op:{
+                                     'srv':sum(1 for s in dyn_s.get(op,{}).values() if s.get('served')),
+                                     'km':_rkm(dyn_r.get(op,[]),rs[op],coords)
+                                 } for op in used_ops
+                             }})
 
     progress.progress(1.0); status.text("Tamamlandı.")
 
@@ -824,6 +830,47 @@ if fmt=='weekly':
                                 'Oran':f"%{c/sum(all_left.values())*100:.1f}"}
                                for t,c in sorted(all_left.items(),key=lambda x:-x[1])])
         st.dataframe(left_df,hide_index=True,use_container_width=True)
+
+    # ── Operatör başına dağılım histogramları ─────────────────────
+    op_days=[r for r in day_results if r.get('op_metrics')]
+    if op_days:
+        st.markdown("### 📊 Operatör Başına Dağılım — Gün Gün")
+        st.caption("Her operatörün günlük servis ettiği iş sayısı ve kat ettiği kilometre.")
+
+        for r in op_days:
+            om=r['op_metrics']
+            if not om: continue
+            day_label=str(r['day'])
+            ops_sorted=sorted(om.keys(),key=lambda o:om[o]['srv'],reverse=True)
+            srv_vals=[om[op]['srv'] for op in ops_sorted]
+            km_vals =[round(om[op]['km'],1) for op in ops_sorted]
+            op_labels=[str(op)[:8] for op in ops_sorted]
+
+            with st.expander(f"📅 {day_label} — {len(ops_sorted)} operatör, toplam {r['srv']} servis, {r['km']:.1f} km",
+                             expanded=False):
+                df_bar=pd.DataFrame({
+                    'Operatör': op_labels,
+                    'Servis edilen iş': srv_vals,
+                    'km': km_vals,
+                })
+
+                col_h1,col_h2=st.columns(2)
+
+                with col_h1:
+                    st.markdown("**Servis Edilen İş Sayısı**")
+                    srv_chart=pd.DataFrame({'Servis':srv_vals},index=op_labels)
+                    st.bar_chart(srv_chart,height=280,use_container_width=True)
+                    avg_srv=sum(srv_vals)/max(len(srv_vals),1)
+                    st.caption(f"Ort: {avg_srv:.1f} iş/op  |  Min: {min(srv_vals)}  |  Max: {max(srv_vals)}")
+
+                with col_h2:
+                    st.markdown("**Kat Edilen Kilometre**")
+                    km_chart=pd.DataFrame({'km':km_vals},index=op_labels)
+                    st.bar_chart(km_chart,height=280,use_container_width=True)
+                    avg_km=sum(km_vals)/max(len(km_vals),1)
+                    st.caption(f"Ort: {avg_km:.1f} km/op  |  Min: {min(km_vals)}  |  Max: {max(km_vals)}")
+
+                st.dataframe(df_bar.set_index('Operatör'),use_container_width=True)
 
     st.stop()
 
