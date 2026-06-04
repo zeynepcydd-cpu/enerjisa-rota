@@ -125,10 +125,20 @@ def _sched(route,origin,t0,coords,JP,due_map,new_set=None):
         lat,lon=jlat,jlon; cur=fin
     return sch
 
-def route_op(op_id,origin,job_list,coords,JP,due_map,t0=T0,new_set=None):
+def route_op(op_id,origin,job_list,coords,JP,due_map,t0=T0,new_set=None,alpha=0.5):
     ns=new_set or set(); olat,olon=origin
-    cands=[j for j in sorted(job_list,key=lambda j:get_pu(j,JP),reverse=True)
-           if j in coords and dist_km(olat,olon,coords[j][0],coords[j][1])/V+S_i<=TEND-t0]
+    # alpha=0: tamamen öncelik bazlı  |  alpha=1: tamamen mesafe bazlı
+    if alpha>=0.99:
+        srt=sorted(job_list,key=lambda j:dist_km(olat,olon,coords[j][0],coords[j][1]) if j in coords else 9e9)
+    elif alpha<=0.01:
+        srt=sorted(job_list,key=lambda j:get_pu(j,JP),reverse=True)
+    else:
+        max_d=max((dist_km(olat,olon,coords[j][0],coords[j][1]) for j in job_list if j in coords),default=1.0)
+        max_p=max((get_pu(j,JP) for j in job_list),default=1.0)
+        srt=sorted(job_list,
+                   key=lambda j:(alpha*dist_km(olat,olon,coords[j][0],coords[j][1])/max(max_d,1e-9)
+                                 -(1-alpha)*get_pu(j,JP)/max(max_p,1e-9)) if j in coords else 9e9)
+    cands=[j for j in srt if j in coords and dist_km(olat,olon,coords[j][0],coords[j][1])/V+S_i<=TEND-t0]
     elen=[j for j in job_list if j not in set(cands)]
     nn=_nn(cands,origin,coords); sv,en=_feasible(nn,origin,coords,due_map,t0)
     route=_two_opt(sv,origin,coords,due_map,t0); final,en2=_feasible(route,origin,coords,due_map,t0)
@@ -569,6 +579,8 @@ n_thr   =st.sidebar.number_input("Yeni iş tetikleyici N",1,100,20)
 prox_km =st.sidebar.number_input("Yakınlık eşiği km (0=kapalı)",0.0,5.0,0.3,0.1)
 commit_n=st.sidebar.number_input("Sabit ilk N iş",1,10,2)
 transfer=st.sidebar.number_input("Maks. atama km (0=kısıtsız)",0.0,10.0,3.0,0.5)
+alpha   =st.sidebar.slider("Öncelik-Mesafe Dengesi (Alpha)",0.0,1.0,0.5,0.05,
+                            help="0 = tamamen öncelik bazlı, 1 = tamamen mesafe bazlı")
 rollover=st.sidebar.number_input("Erteleme katsayısı",0.0,1.0,0.1,0.05)
 due_exc =st.sidebar.number_input("Vade aşımı katsayısı",0.0,1.0,0.3,0.05)
 
@@ -604,7 +616,7 @@ with st.spinner("Statik plan hesaplanıyor..."):
     op_jobs=balance(op_jobs,op_ids,op_start,coords,JP)
     st_r={}; st_s={}
     for op in op_ids:
-        r,s,_=route_op(op,op_start[op],op_jobs[op],coords,JP,due_map)
+        r,s,_=route_op(op,op_start[op],op_jobs[op],coords,JP,due_map,alpha=float(alpha))
         st_r[op]=r; st_s[op]=s
     orig_ids=set(job_ids)
     cancel_ev,arrival_ev=build_events(df_raw,orig_ids,op_jobs,coords,JP,due_map,jtype_map,jcre_map)
