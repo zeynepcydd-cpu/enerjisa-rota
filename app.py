@@ -783,6 +783,12 @@ if fmt=='weekly':
                              'n_pre':len(today_pre),'n_in':len(arrival_ev_today),
                              'n_ops':len(used_ops),'vpi':vpi_row,
                              'carryover_n':len(carryover),
+                             'routes':{   # harita için
+                                 'dyn_r':dyn_r,'dyn_s':dyn_s,
+                                 'st_r':st_r,'st_s':st_s,
+                                 'rs':rs,'op_ids':used_ops,
+                                 'new_asgn':new_asgn,'cancelled':cancelled,
+                             },
                              'op_metrics':{
                                  op:{
                                      'srv':sum(1 for s in dyn_s.get(op,{}).values() if s.get('served')),
@@ -871,6 +877,38 @@ if fmt=='weekly':
                     st.caption(f"Ort: {avg_km:.1f} km/op  |  Min: {min(km_vals)}  |  Max: {max(km_vals)}")
 
                 st.dataframe(df_bar.set_index('Operatör'),use_container_width=True)
+
+    # ── Haritalar (gün seçimli) ────────────────────────────────────
+    route_days=[r for r in day_results if r.get('routes')]
+    if route_days:
+        st.markdown("### 🗺️ Haritalar")
+        day_options=[str(r['day']) for r in route_days]
+        chosen_day=st.selectbox("Görüntülenecek gün:",day_options,index=len(day_options)-1)
+        rd=next(r for r in route_days if str(r['day'])==chosen_day)
+        rv=rd['routes']
+        hist_day=reconstruct_historical(df_raw,due_map,JP,jtype_map)
+        map_tab1,map_tab2,map_tab3=st.tabs(["🗺️ Statik","🗺️ Dinamik","🗺️ Gerçek"])
+        with map_tab1:
+            st.caption(f"{chosen_day} — Statik Plan")
+            with st.spinner("Harita oluşturuluyor..."):
+                html=make_map(rv['st_r'],rv['st_s'],rv['op_ids'],rv['rs'],
+                              coords,df_pool,JP=JP,due_map=due_map)
+            components.html(html,height=550,scrolling=False)
+        with map_tab2:
+            st.caption(f"{chosen_day} — Dinamik Plan ({rd['n_ops']} op, {rd['srv']} servis, {rd['cancelled']} iptal)")
+            with st.spinner("Harita oluşturuluyor..."):
+                html=make_map(rv['dyn_r'],rv['dyn_s'],rv['op_ids'],rv['rs'],
+                              coords,df_pool,cancelled=rv['cancelled'],
+                              new_assigned=rv['new_asgn'],JP=JP,due_map=due_map)
+            components.html(html,height=550,scrolling=False)
+        with map_tab3:
+            st.caption(f"{chosen_day} — Gerçek Operatör Rotaları")
+            if hist_day:
+                with st.spinner("Harita oluşturuluyor..."):
+                    html=make_historical_map(hist_day,rv['rs'],df_pool,due_map=due_map,JP=JP)
+                if html: components.html(html,height=550,scrolling=False)
+            else:
+                st.info("Bu veri setinde gerçek rota bilgisi (OK statüsü) bulunamadı.")
 
     st.stop()
 
