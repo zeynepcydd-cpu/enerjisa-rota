@@ -446,7 +446,7 @@ def make_map(routes,schedules,op_ids,op_coords,coords,df,
             if not co: continue
             jlat,jlon=co; is_new=j in new_assigned; is_uns=not s.get('served',False)
             tard=s.get('tardiness',0) if s.get('served') else 0
-            col=_jcol(tard,is_new,is_uns,rgb); rad=4 if is_uns else 6
+            col=_jcol(tard,is_new,is_uns,rgb); rad=3 if is_uns else 5
             arr_s=f'<br>{dk2s(s["arrival"])}→{dk2s(s["finish"])}' if s.get('arrival') else '<br>YAPILAMADI'
             tard_s=f'<br>⚠{tard:.0f}dk' if tard>0 else ''
             popup=folium.Popup(
@@ -462,7 +462,7 @@ def make_map(routes,schedules,op_ids,op_coords,coords,df,
     for jid in sorted(cancelled):
         co=coords.get(jid)
         if not co: continue
-        folium.CircleMarker([co[0],co[1]],radius=5,color='#CC0000',fill=True,
+        folium.CircleMarker([co[0],co[1]],radius=4,color='#CC0000',fill=True,
             fill_color='#CC0000',fill_opacity=0.85,
             popup=folium.Popup(f'✕ {jid} İPTAL',max_width=120)).add_to(fg_c)
     fg_c.add_to(m)
@@ -499,7 +499,7 @@ def make_historical_map(historical,op_coords_hint,df,due_map=None,JP=None):
         for seq,(pt,t_fin,jid) in enumerate(zip(pts,h['times'],h['jobs'])):
             d=due_map.get(jid,TEND); tard=max(0.0,t_fin-d)
             col=rgb if tard<=0 else '#FF8C00'
-            folium.CircleMarker([pt[0],pt[1]],radius=6,color=col,fill=True,fill_color=col,fill_opacity=0.9,
+            folium.CircleMarker([pt[0],pt[1]],radius=4,color=col,fill=True,fill_color=col,fill_opacity=0.9,
                 popup=folium.Popup(
                     f'<b>#{seq+1} {jid}</b><br>Tür:{jtm.get(jid,"?")}<br>Bit:{dk2s(t_fin)}'
                     +(f'<br>⚠{tard:.0f}dk' if tard>0 else ''),max_width=170)).add_to(fg)
