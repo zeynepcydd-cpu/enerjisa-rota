@@ -508,10 +508,83 @@ def make_historical_map(historical,op_coords_hint,df,due_map=None,JP=None):
     return m._repr_html_()
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  VERİ YÜKLEME
+#  FORMAT TESPİT + HAFTALIK YARDIMCILAR
 # ─────────────────────────────────────────────────────────────────────────────
+SKIP_WK={'KOK'}
+
+def detect_format(xls):
+    sheets=xls.sheet_names
+    if any(any(k in s for k in ['Start','Position','User','Başlangıç']) for s in sheets):
+        return 'daily'
+    df0=pd.read_excel(xls,sheet_name=sheets[0],nrows=0)
+    if 'Yaratma Tarihi' in df0.columns:
+        dft=pd.read_excel(xls,sheet_name=sheets[0],usecols=['Yaratma Tarihi'])
+        return 'weekly' if dft['Yaratma Tarihi'].nunique()>1 else 'daily'
+    return 'daily'
+
+def build_job_pool(df_raw):
+    df=df_raw[~df_raw['Sipariş Durumu'].astype(str).str.strip().str.upper().isin(SKIP_WK)].copy()
+    for col in ['Tesisat Enlem','Tesisat Boylam']:
+        df[col]=pd.to_numeric(df[col],errors='coerce')
+    df=df.dropna(subset=['Tesisat Enlem','Tesisat Boylam']).reset_index(drop=True)
+    coords={r['Sipariş No']:(float(r['Tesisat Enlem']),float(r['Tesisat Boylam'])) for _,r in df.iterrows()}
+    JP={r['Sipariş No']:cost_p(r) for _,r in df.iterrows()}
+    jtype_map=dict(zip(df['Sipariş No'],df['Sipariş Türü'].str[:2].str.upper()))
+    jcre_map={}
+    for _,row in df.iterrows():
+        t=s2dk(row.get('Yaratma Saati','')); jcre_map[row['Sipariş No']]=t if (t and 0<=t<=TEND) else 0
+    return df,coords,JP,jtype_map,jcre_map
+
+def extract_day_ops(df_raw,day):
+    op_col='Siparişi Tamamlayan Kullanıcı 1'
+    if op_col not in df_raw.columns: return [],{}
+    mask=(pd.to_datetime(df_raw['Yaratma Tarihi'],errors='coerce').dt.date==day)
+    df_d=df_raw[mask].dropna(subset=['Tesisat Enlem','Tesisat Boylam'])
+    cl={}
+    for _,row in df_d.iterrows():
+        op=str(row.get(op_col,'')).strip()
+        if op in ('nan','None','','NaN'): continue
+        cl.setdefault(op,[]).append((float(row['Tesisat Enlem']),float(row['Tesisat Boylam'])))
+    return (list(cl.keys()),
+            {op:(float(np.mean([c[0] for c in v])),float(np.mean([c[1] for c in v]))) for op,v in cl.items()})
+
+def build_cancel_pool(df_raw,day,active_ids):
+    mask=(pd.to_datetime(df_raw['Yaratma Tarihi'],errors='coerce').dt.date==day)
+    evs=[]; seen=set()
+    for _,row in df_raw[mask].iterrows():
+        jid=str(row.get('Sipariş No','')); st=str(row.get('Sipariş Durumu','')).upper()
+        if jid not in active_ids or st not in CAN_ST or jid in seen: continue
+        t=s2dk(row.get('Tamamlanma Saati',''))
+        if t and 0<=t<=TEND: evs.append({'t':t,'job':jid,'op':None}); seen.add(jid)
+    return sorted(evs,key=lambda e:e['t'])
+
+def sim_day_rolling(day,pool_ids,op_ids,op_coords,coords,JP,due_map,jtype_map,
+                    cancel_ev,arrival_ev,p):
+    if len(pool_ids)<len(op_ids):
+        op_ids=op_ids[:max(1,len(pool_ids)//2+1)]
+        op_coords={k:v for k,v in op_coords.items() if k in op_ids}
+    if not op_ids or not pool_ids: return {},{},set(),set(),0,{},{},{},op_ids,{}
+    labels,centers=kmeans_cluster(pool_ids,coords,op_ids,op_coords)
+    c2o=macar_assign(centers,op_ids,op_coords)
+    op_jobs={op:[] for op in op_ids}
+    for jid,cl in labels.items(): op_jobs[c2o[cl]].append(jid)
+    op2cl={op:cl for cl,op in c2o.items()}
+    rs={op:centers[op2cl[op]] for op in op_ids}
+    auto_min=max(1,len(pool_ids)//(len(op_ids)*3))
+    op_jobs=balance(op_jobs,op_ids,rs,coords,JP,2.0,5,auto_min)
+    st_r={}; st_s={}
+    for op in op_ids:
+        r,s,_=route_op(op,rs[op],op_jobs[op],coords,JP,due_map,alpha=p.get('alpha',0.5))
+        st_r[op]=r; st_s[op]=s
+    dyn_r,dyn_s,new_asgn,can,n_r=simulate(
+        cancel_ev,arrival_ev,op_ids,rs,op_jobs,coords,JP,due_map,st_r,st_s,
+        n_thr=p.get('n_thr',20),prox_km=p.get('prox_km',0.3),
+        commit_n=p.get('commit_n',2),transfer_km=p.get('transfer_km',3.0))
+    return dyn_r,dyn_s,can,new_asgn,n_r,st_r,st_s,rs,op_ids,op_jobs
 def load_from_upload(uploaded_file):
-    xls=pd.ExcelFile(io.BytesIO(uploaded_file.read()))
+    raw=uploaded_file.read()
+    xls=pd.ExcelFile(io.BytesIO(raw))
+    fmt=detect_format(xls)
     dsh=next(s for s in xls.sheet_names if any(x in s for x in ['Raporu','Sistem','Sık','Data','Sayfa']))
     df_raw=pd.read_excel(xls,sheet_name=dsh)
     ssh=next((s for s in xls.sheet_names if any(x in s for x in ['Start','Position','User','Başlangıç'])),None)
@@ -535,7 +608,7 @@ def load_from_upload(uploaded_file):
     for _,row in df.iterrows():
         t=s2dk(row.get('Yaratma Saati','')); jcre_map[row['Sipariş No']]=t if (t and 0<=t<=TEND) else 0
     due_map={j:due_date_of(j,jtype_map,jcre_map) for j in job_ids}
-    return df_raw,df,op_ids,op_coords,job_ids,coords,JP,due_map,jtype_map,jcre_map
+    return df_raw,df,op_ids,op_coords,job_ids,coords,JP,due_map,jtype_map,jcre_map,fmt
 
 def build_events(df_raw,orig_ids,op_jobs,coords,JP,due_map,jtype_map,jcre_map):
     is2op={j:op for op,jl in op_jobs.items() for j in jl}
@@ -599,12 +672,164 @@ if uploaded_file is None:
 
 with st.spinner("Veri yükleniyor..."):
     try:
-        df_raw,df,op_ids,op_coords,job_ids,coords,JP,due_map,jtype_map,jcre_map=load_from_upload(uploaded_file)
+        df_raw,df,op_ids,op_coords,job_ids,coords,JP,due_map,jtype_map,jcre_map,fmt=load_from_upload(uploaded_file)
     except Exception as e:
         st.error(f"Veri yükleme hatası: {e}")
         st.stop()
 
-st.sidebar.success(f"✓ {len(job_ids)} iş | {len(op_ids)} operatör")
+st.sidebar.success(f"✓ {len(job_ids)} iş | Format: {fmt.upper()}")
+
+# ══════════════════════════════════════════════════════
+#  HAFTALIK VERİ AKIŞI
+# ══════════════════════════════════════════════════════
+if fmt=='weekly':
+    import datetime as _dt
+
+    with st.spinner("Haftalık iş havuzu hazırlanıyor..."):
+        df_pool,pool_coords,pool_JP,pool_jtype,pool_jcre=build_job_pool(df_raw)
+        all_ids=set(df_pool['Sipariş No'])
+        coords.update(pool_coords); JP.update(pool_JP)
+        jtype_map.update(pool_jtype); jcre_map.update(pool_jcre)
+        due_map.update({j:due_date_of(j,jtype_map,jcre_map) for j in all_ids})
+        df_raw['_date']=pd.to_datetime(df_raw['Yaratma Tarihi'],errors='coerce').dt.date
+        all_days=sorted(df_raw['_date'].dropna().unique())
+        work_days=[d for d in all_days if _dt.date.weekday(d)<5]
+        sim_days=work_days[-5:] if len(work_days)>=5 else work_days
+        backlog=set(df_raw[pd.to_datetime(df_raw['Yaratma Tarihi'],errors='coerce').dt.date
+                           .apply(lambda d: d<sim_days[0] if d else False)]['Sipariş No'])&all_ids
+        day_new={day:set(df_raw[pd.to_datetime(df_raw['Yaratma Tarihi'],errors='coerce').dt.date==day
+                                ]['Sipariş No'])&all_ids for day in sim_days}
+
+    p={'n_thr':int(n_thr),'prox_km':float(prox_km),'commit_n':int(commit_n),
+       'transfer_km':float(transfer),'alpha':float(alpha),'lb_w':0.3}
+
+    st.markdown(f"### 📅 Haftalık Simülasyon: {sim_days[0]} → {sim_days[-1]}")
+    st.caption(f"Backlog: {len(backlog)} iş | Sim. günleri: {len(sim_days)}")
+
+    progress=st.progress(0); status=st.empty()
+    day_results=[]; all_left={}; carryover=set(backlog)
+
+    for i,day in enumerate(sim_days):
+        status.text(f"Gün {i+1}/{len(sim_days)}: {day} işleniyor...")
+        progress.progress((i)/len(sim_days))
+
+        today_new=day_new.get(day,set())
+        today_pre=set(); arrival_ev_today=[]
+        for jid in today_new:
+            if jid not in all_ids: continue
+            t_cre=jcre_map.get(jid,0)
+            if t_cre<=0: today_pre.add(jid)
+            else:
+                arrival_ev_today.append({'t':t_cre,'job':jid})
+                if jid not in due_map or due_map[jid]<t_cre:
+                    due_map[jid]=due_date_of(jid,jtype_map,jcre_map,clamp=True)
+        arrival_ev_today.sort(key=lambda e:e['t'])
+        pool_ids=list((carryover|today_pre)&all_ids)
+        day_op_ids,day_op_coords=extract_day_ops(df_raw,day)
+
+        if not day_op_ids or not pool_ids:
+            day_results.append({'day':day,'srv':0,'km':0,'cancelled':0,
+                                 'n_carry':len(carryover),'n_pre':len(today_pre),
+                                 'n_in':len(arrival_ev_today),'n_ops':0,
+                                 'vpi':None,'carryover_n':len(carryover)})
+            continue
+        try:
+            cans=build_cancel_pool(df_raw,day,set(pool_ids)|{e['job'] for e in arrival_ev_today})
+            out=sim_day_rolling(day,pool_ids,list(day_op_ids),dict(day_op_coords),
+                                coords,JP,due_map,jtype_map,cans,arrival_ev_today,p)
+            dyn_r,dyn_s,cancelled,new_asgn,n_r,st_r,st_s,rs,used_ops,op_jobs=out
+        except Exception as e:
+            st.warning(f"  {day} hatası: {e}")
+            day_results.append({'day':day,'srv':0,'km':0,'cancelled':0,
+                                 'n_carry':len(carryover),'n_pre':len(today_pre),
+                                 'n_in':len(arrival_ev_today),'n_ops':len(day_op_ids),
+                                 'vpi':None,'carryover_n':0})
+            continue
+
+        dm=metrics(dyn_r,dyn_s,used_ops,rs,coords,new_asgn,set(pool_ids))
+
+        # VPI günlük
+        try:
+            or_r,or_s,or_due,o_start=compute_oracle(
+                cans,arrival_ev_today,used_ops,rs,op_jobs,coords,JP,due_map,jtype_map,jcre_map)
+            f0c,_=total_cost(st_r,st_s,used_ops,rs,coords,JP,due_map,rollover,due_exc)
+            fdc,_=total_cost(dyn_r,dyn_s,used_ops,rs,coords,JP,due_map,rollover,due_exc)
+            fsc,_=total_cost(or_r,or_s,used_ops,o_start,coords,JP,or_due,rollover,due_exc)
+            new_pen=sum(JP.get(e['job'],(0,0,50))[2]*(1+rollover+(due_exc if due_map.get(e['job'],TEND)<TEND else 0))
+                        for e in arrival_ev_today if e['job'] in JP)
+            f0_aug=f0c+new_pen
+            def _p(c): return c/max(f0_aug,1)*100
+            def _i(c): return (f0_aug-c)/max(f0_aug,1)*100
+            vpi_row={'fs':_p(f0_aug),'fd':_p(fdc),'ft':_p(fsc),
+                     'dyn_imp':_i(fdc),'vpi_imp':_i(fsc),
+                     'eff':_i(fdc)/max(_i(fsc),0.001)*100}
+        except Exception:
+            vpi_row=None
+
+        # Carryover
+        carryover=set()
+        for op_sch in dyn_s.values():
+            for jid,s in op_sch.items():
+                if not s.get('served') and jid not in cancelled: carryover.add(jid)
+        for jid in pool_ids:
+            all_dyn={j for sch in dyn_s.values() for j in sch}
+            if jid not in all_dyn and jid not in cancelled: carryover.add(jid)
+
+        for jid in carryover:
+            typ=jtype_map.get(jid,'?'); all_left[typ]=all_left.get(typ,0)+1
+
+        day_results.append({'day':day,'srv':dm['srv'],'km':dm['km'],
+                             'cancelled':len(cancelled),'n_carry':len(set(pool_ids)-today_pre),
+                             'n_pre':len(today_pre),'n_in':len(arrival_ev_today),
+                             'n_ops':len(used_ops),'vpi':vpi_row,
+                             'carryover_n':len(carryover)})
+
+    progress.progress(1.0); status.text("Tamamlandı.")
+
+    # ── Haftalık çıktılar ──────────────────────────────────────────
+    st.markdown("### 📋 Günlük İş Akışı")
+    flow_rows=[]
+    for r in day_results:
+        bas=r['n_carry']+r['n_pre']; ekl=r['n_in']; ipt=r['cancelled']
+        srv=r['srv']; son=bas+ekl-ipt-srv
+        flow_rows.append({'Gün':str(r['day']),'Başlangıç':bas,'Eklenen':ekl,
+                          'İptal':ipt,'Servis':srv,'Son':son,'km':round(r['km'],1),'Op':r['n_ops']})
+    st.dataframe(pd.DataFrame(flow_rows),hide_index=True,use_container_width=True)
+
+    vpi_rows=[r for r in day_results if r.get('vpi')]
+    if vpi_rows:
+        st.markdown("### 📈 VPI — Gün Gün")
+        vpi_data=[]
+        for r in vpi_rows:
+            v=r['vpi']
+            vpi_data.append({'Gün':str(r['day']),
+                             'Fs (Statik %)':f"{v['fs']:.1f}%",
+                             'Fd (Dinamik %)':f"{v['fd']:.1f}%",
+                             'Ft (Tam Bilgi %)':f"{v['ft']:.1f}%",
+                             'Dinamik İyileşme':f"+{v['dyn_imp']:.1f}%",
+                             'VPI (Fs→Ft)':f"+{v['vpi_imp']:.1f}%",
+                             'Yakalanma %':f"{v['eff']:.1f}%"})
+        st.dataframe(pd.DataFrame(vpi_data),hide_index=True,use_container_width=True)
+        avg_dyn=sum(r['vpi']['dyn_imp'] for r in vpi_rows)/len(vpi_rows)
+        avg_vpi=sum(r['vpi']['vpi_imp'] for r in vpi_rows)/len(vpi_rows)
+        avg_eff=sum(r['vpi']['eff'] for r in vpi_rows)/len(vpi_rows)
+        col_a,col_b,col_c=st.columns(3)
+        col_a.metric("Haftalık ort. dinamik iyileşme",f"%{avg_dyn:.1f}")
+        col_b.metric("Haftalık ort. VPI",f"%{avg_vpi:.1f}")
+        col_c.metric("Haftalık ort. yakalanma",f"%{avg_eff:.1f}")
+
+    if all_left:
+        st.markdown("### 📦 Hafta Sonu Kalan İşler (Tür Bazında)")
+        left_df=pd.DataFrame([{'Tür':t,'Kalan':c,
+                                'Oran':f"%{c/sum(all_left.values())*100:.1f}"}
+                               for t,c in sorted(all_left.items(),key=lambda x:-x[1])])
+        st.dataframe(left_df,hide_index=True,use_container_width=True)
+
+    st.stop()
+
+# ══════════════════════════════════════════════════════
+#  GÜNLÜK VERİ AKIŞI (mevcut kod devam ediyor)
+# ══════════════════════════════════════════════════════
 
 with st.spinner("Statik plan hesaplanıyor..."):
     labels,centers=kmeans_cluster(job_ids,coords,op_ids,op_coords)
