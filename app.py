@@ -581,6 +581,7 @@ def sim_day_rolling(day,pool_ids,op_ids,op_coords,coords,JP,due_map,jtype_map,
         n_thr=p.get('n_thr',20),prox_km=p.get('prox_km',0.3),
         commit_n=p.get('commit_n',2),transfer_km=p.get('transfer_km',3.0))
     return dyn_r,dyn_s,can,new_asgn,n_r,st_r,st_s,rs,op_ids,op_jobs
+
 def load_from_upload(uploaded_file):
     raw=uploaded_file.read()
     xls=pd.ExcelFile(io.BytesIO(raw))
@@ -634,36 +635,570 @@ def build_events(df_raw,orig_ids,op_jobs,coords,JP,due_map,jtype_map,jcre_map):
         if jid not in due_map: due_map[jid]=due_date_of(jid,jtype_map,jcre_map,clamp=t>0)
     return sorted(cev,key=lambda e:e['t']),sorted(aev,key=lambda e:e['t'])
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  STREAMLIT ARAYÜZÜ
-# ─────────────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="EnerjiSA Rotalama Sistemi",layout="wide",page_icon="⚡")
+# ═════════════════════════════════════════════════════════════════════════════
+#  SUNUM KATMANI  —  EnerjiSA Üst Yönetim Arayüzü
+#  (Algoritma çekirdeği yukarıda; aşağısı yalnızca görselleştirme/arayüzdür)
+#  Ek bağımlılık: plotly  ->  pip install plotly
+# ═════════════════════════════════════════════════════════════════════════════
+import datetime as _dt
 
-st.sidebar.image(
-    "https://upload.wikimedia.org/wikipedia/commons/4/41/Enerjisa_logo.png",
-    width=150
-)
+try:
+    import plotly.express as px
+    import plotly.graph_objects as go
+    HAS_PLOTLY = True
+except Exception:
+    HAS_PLOTLY = False
 
+# Kurumsal renk paleti
+ESA_SARI   = "#F9B000"
+ESA_SARI_K = "#E8990C"
+ESA_MAVI   = "#005AA0"
+ESA_MAVI_K = "#003D6E"
+C_MODEL    = "#005AA0"   # model / dinamik
+C_REAL     = "#E8740C"   # gerçek
+C_STATIC   = "#7FB2D9"   # statik
+C_OK       = "#1F9D55"
+C_LATE     = "#E8740C"
+C_BAD      = "#C0392B"
+LOGO_URL   = "https://upload.wikimedia.org/wikipedia/commons/4/41/Enerjisa_logo.png"
+
+BASE_DT = _dt.datetime(2024, 1, 1, SHIFT_S, 0)
+def _to_dt(minutes): return BASE_DT + _dt.timedelta(minutes=float(minutes))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  GÖRSEL STİL
+# ─────────────────────────────────────────────────────────────────────────────
+def inject_css():
+    st.markdown(f"""
+    <style>
+      .block-container {{ padding-top: 1.4rem; padding-bottom: 2rem; max-width: 1500px; }}
+      h1, h2, h3 {{ color: {ESA_MAVI_K}; }}
+      .esa-hero {{
+        display:flex; gap:14px; flex-wrap:wrap; margin: 6px 0 18px 0;
+      }}
+      .esa-card {{
+        flex:1 1 180px; background:#fff; border:1px solid #E6E9EE;
+        border-top:4px solid {ESA_MAVI}; border-radius:14px;
+        padding:16px 18px; box-shadow:0 2px 10px rgba(0,0,0,.04);
+      }}
+      .esa-card.alt {{ border-top-color:{ESA_SARI}; }}
+      .esa-card.good {{ border-top-color:{C_OK}; }}
+      .esa-card .lbl {{ font-size:.78rem; color:#6B7785; letter-spacing:.03em;
+                        text-transform:uppercase; font-weight:600; }}
+      .esa-card .val {{ font-size:1.9rem; font-weight:800; color:{ESA_MAVI_K}; line-height:1.1; margin-top:4px; }}
+      .esa-card .sub {{ font-size:.85rem; margin-top:6px; }}
+      .esa-up {{ color:{C_OK}; font-weight:700; }}
+      .esa-down {{ color:{C_BAD}; font-weight:700; }}
+      .esa-flat {{ color:#6B7785; }}
+      .esa-banner {{
+        background:linear-gradient(90deg,{ESA_MAVI} 0%, {ESA_MAVI_K} 100%);
+        color:#fff; border-radius:14px; padding:18px 22px; margin-bottom:10px;
+        display:flex; align-items:center; gap:18px;
+      }}
+      .esa-banner .t {{ font-size:1.45rem; font-weight:800; }}
+      .esa-banner .s {{ opacity:.9; font-size:.95rem; }}
+      .esa-pill {{ display:inline-block; background:{ESA_SARI}; color:#3a2a00;
+        border-radius:20px; padding:3px 12px; font-weight:700; font-size:.85rem; }}
+      .stTabs [data-baseweb="tab-list"] {{ gap:4px; }}
+      .stTabs [data-baseweb="tab"] {{ font-weight:600; }}
+      div[data-testid="stMetricValue"] {{ font-size:1.5rem; }}
+    </style>
+    """, unsafe_allow_html=True)
+
+
+def hero_cards(cards):
+    """cards: list of dict(lbl,val,sub_html,cls)"""
+    html = '<div class="esa-hero">'
+    for c in cards:
+        cls = c.get("cls", "")
+        sub = f'<div class="sub">{c["sub"]}</div>' if c.get("sub") else ""
+        html += f'<div class="esa-card {cls}"><div class="lbl">{c["lbl"]}</div>' \
+                f'<div class="val">{c["val"]}</div>{sub}</div>'
+    html += '</div>'
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def _delta_html(model, real, lower_is_better=True, unit="", pct=True):
+    """Gerçeğe göre modelin farkını renkli okla döndürür."""
+    if real is None or real == 0:
+        return f'<span class="esa-flat">gerçek veri yok</span>'
+    diff = model - real
+    better = (diff < 0) if lower_is_better else (diff > 0)
+    arrow = "▼" if diff < 0 else ("▲" if diff > 0 else "■")
+    cls = "esa-up" if better else ("esa-down" if diff != 0 else "esa-flat")
+    if pct:
+        p = diff / real * 100
+        return f'<span class="{cls}">{arrow} {abs(p):.1f}% (gerçeğe göre)</span>'
+    return f'<span class="{cls}">{arrow} {abs(diff):,.0f}{unit}</span>'
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  ZAMAN ÇİZELGESİ (GANTT) — "işler hangi saatte kapanıyor"
+# ─────────────────────────────────────────────────────────────────────────────
+def build_gantt(routes, schedules, op_ids, title="Dinamik Rota Zaman Çizelgesi"):
+    if not HAS_PLOTLY:
+        return None
+    rows = []
+    for op in op_ids:
+        sch = schedules.get(op, {})
+        for seq, j in enumerate(routes.get(op, []), 1):
+            s = sch.get(j, {})
+            if not s.get("served") or s.get("arrival") is None:
+                continue
+            tard = s.get("tardiness", 0)
+            rows.append(dict(
+                Operatör=f"Op {op}", Baslangic=_to_dt(s["arrival"]), Bitis=_to_dt(s["finish"]),
+                Durum=("Gecikmeli" if tard > 0 else "Zamanında"),
+                Is=str(j), Sira=seq, Varis=dk2s(s["arrival"]),
+                Kapanis=dk2s(s["finish"]), Gecikme=(f"{tard:.0f} dk" if tard > 0 else "—")))
+    if not rows:
+        return None
+    dfg = pd.DataFrame(rows)
+    fig = px.timeline(
+        dfg, x_start="Baslangic", x_end="Bitis", y="Operatör", color="Durum",
+        color_discrete_map={"Zamanında": C_MODEL, "Gecikmeli": C_LATE},
+        hover_data={"Is": True, "Sira": True, "Varis": True, "Kapanis": True,
+                    "Gecikme": True, "Baslangic": False, "Bitis": False, "Operatör": False})
+    fig.update_yaxes(autorange="reversed", title=None)
+    fig.add_vrect(x0=_to_dt(TBRK_S), x1=_to_dt(TBRK_E), fillcolor="#9E9E9E",
+                  opacity=0.13, line_width=0, annotation_text="Öğle molası",
+                  annotation_position="top left",
+                  annotation=dict(font_size=10, font_color="#555"))
+    fig.update_xaxes(tickformat="%H:%M", title="Saat")
+    fig.update_layout(
+        title=title, legend_title=None, plot_bgcolor="white",
+        height=max(300, 38 * len(op_ids) + 130),
+        margin=dict(l=10, r=10, t=55, b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+    return fig
+
+
+def build_op_gantt(op, route, sch):
+    if not HAS_PLOTLY:
+        return None
+    rows = []; order = []
+    for seq, j in enumerate(route, 1):
+        s = sch.get(j, {})
+        if not s.get("served") or s.get("arrival") is None:
+            continue
+        lbl = f"#{seq:02d} · {j}"
+        tard = s.get("tardiness", 0)
+        rows.append(dict(Is=lbl, Baslangic=_to_dt(s["arrival"]), Bitis=_to_dt(s["finish"]),
+                         Durum=("Gecikmeli" if tard > 0 else "Zamanında"),
+                         Kapanis=dk2s(s["finish"]),
+                         Gecikme=(f"{tard:.0f} dk" if tard > 0 else "—")))
+        order.append(lbl)
+    if not rows:
+        return None
+    dfg = pd.DataFrame(rows)
+    fig = px.timeline(
+        dfg, x_start="Baslangic", x_end="Bitis", y="Is", color="Durum",
+        color_discrete_map={"Zamanında": C_MODEL, "Gecikmeli": C_LATE},
+        hover_data={"Kapanis": True, "Gecikme": True, "Baslangic": False, "Bitis": False, "Is": False})
+    fig.update_yaxes(autorange="reversed", title=None, categoryorder="array",
+                     categoryarray=order[::-1])
+    fig.add_vrect(x0=_to_dt(TBRK_S), x1=_to_dt(TBRK_E), fillcolor="#9E9E9E",
+                  opacity=0.13, line_width=0)
+    fig.update_xaxes(tickformat="%H:%M", title="Saat")
+    fig.update_layout(title=f"Op {op} — İş Kapanış Zaman Çizelgesi", legend_title=None,
+                      plot_bgcolor="white", height=max(280, 22 * len(rows) + 120),
+                      margin=dict(l=10, r=10, t=50, b=10),
+                      legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+    return fig
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  OPERATÖR BAŞINA MODEL vs GERÇEK
+# ─────────────────────────────────────────────────────────────────────────────
+def op_model_stats(op, dyn_r, dyn_s, rs, coords):
+    sch = dyn_s.get(op, {})
+    srv = sum(1 for s in sch.values() if s.get("served"))
+    late = sum(1 for s in sch.values() if s.get("served") and s.get("tardiness", 0) > 0)
+    km = _rkm(dyn_r.get(op, []), rs[op], coords)
+    fuel = km * FUEL
+    tard = sum(s.get("tardy_pen", 0) + s.get("fixed_pen", 0) for s in sch.values())
+    return dict(srv=srv, late=late, km=km, fuel=fuel, tard=tard, cost=fuel + tard,
+                ontime=(srv - late) / max(srv, 1) * 100)
+
+
+def model_vs_real_table(op_ids, dyn_r, dyn_s, rs, coords, historical, due_map):
+    rows = []
+    for op in op_ids:
+        m = op_model_stats(op, dyn_r, dyn_s, rs, coords)
+        h = historical.get(str(op)) or historical.get(op)
+        row = {"Operatör": str(op),
+               "Model İş": m["srv"], "Gerçek İş": (h["n_served"] if h else None),
+               "Model km": round(m["km"], 1), "Gerçek km": (round(h["km"], 1) if h else None),
+               "Model ₺": round(m["cost"], 0), "Gerçek ₺": (round(h["cost"], 0) if h else None)}
+        if h:
+            row["km Farkı"] = round(m["km"] - h["km"], 1)
+            row["₺ Tasarruf"] = round(h["cost"] - m["cost"], 0)
+        else:
+            row["km Farkı"] = None; row["₺ Tasarruf"] = None
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def real_late_count(op, historical, due_map):
+    h = historical.get(str(op)) or historical.get(op)
+    if not h:
+        return 0, 0
+    late = sum(1 for jid, t in zip(h["jobs"], h["times"])
+               if max(0.0, t - due_map.get(jid, TEND)) > 0)
+    return late, h["n_served"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  OPERATÖR KARŞILAŞTIRMA HARİTASI (model dolu çizgi + gerçek kesik çizgi)
+# ─────────────────────────────────────────────────────────────────────────────
+def make_overlay_map(op, route, sch, start, coords, hist_entry, due_map, jtm):
+    pts_model = [start] + [coords[j] for j in route if j in coords]
+    allp = list(pts_model)
+    if hist_entry and hist_entry["positions"]:
+        allp += hist_entry["positions"]
+    lats = [p[0] for p in allp]; lons = [p[1] for p in allp]
+    m = folium.Map(location=(float(np.mean(lats)), float(np.mean(lons))), zoom_start=13)
+    legend = f"""<div style="position:fixed;bottom:30px;left:10px;z-index:1000;
+        background:white;padding:10px;border-radius:8px;border:1px solid #ccc;font-size:12px;opacity:.95">
+    <b>Operatör {op}</b><br>
+    <span style="color:{C_MODEL}">━━</span> Model rotası (planlanan)<br>
+    <span style="color:{C_REAL}">┅┅</span> Gerçek rota (gerçekleşen)<br>
+    <span style="color:{C_LATE}">●</span> Gecikmeli iş</div>"""
+    m.get_root().html.add_child(folium.Element(legend))
+
+    # Model rotası (dolu)
+    if len(pts_model) > 1:
+        folium.PolyLine(pts_model, color=C_MODEL, weight=4, opacity=.85,
+                        tooltip="Model rotası").add_to(m)
+    for seq, j in enumerate(route, 1):
+        s = sch.get(j, {})
+        if not s.get("served") or j not in coords:
+            continue
+        tard = s.get("tardiness", 0)
+        col = C_LATE if tard > 0 else C_MODEL
+        folium.CircleMarker(
+            coords[j], radius=5, color=col, fill=True, fill_color=col, fill_opacity=.9,
+            popup=folium.Popup(
+                f'<b>MODEL #{seq} · {j}</b><br>Tür:{jtm.get(j,"?")}<br>'
+                f'{dk2s(s["arrival"])}→{dk2s(s["finish"])}'
+                + (f'<br>⚠ {tard:.0f} dk gecikme' if tard > 0 else ""), max_width=200)).add_to(m)
+
+    # Gerçek rota (kesik)
+    if hist_entry and hist_entry["positions"]:
+        real_pts = [start] + hist_entry["positions"]
+        folium.PolyLine(real_pts, color=C_REAL, weight=3, opacity=.7,
+                        dash_array="8,6", tooltip="Gerçek rota").add_to(m)
+        for seq, (pt, t, jid) in enumerate(zip(hist_entry["positions"], hist_entry["times"], hist_entry["jobs"]), 1):
+            tard = max(0.0, t - due_map.get(jid, TEND))
+            col = C_LATE if tard > 0 else C_REAL
+            folium.CircleMarker(
+                pt, radius=4, color=col, fill=True, fill_color=col, fill_opacity=.85,
+                popup=folium.Popup(
+                    f'<b>GERÇEK #{seq} · {jid}</b><br>Tür:{jtm.get(jid,"?")}<br>Bitiş:{dk2s(t)}'
+                    + (f'<br>⚠ {tard:.0f} dk gecikme' if tard > 0 else ""), max_width=200)).add_to(m)
+
+    folium.CircleMarker(start, radius=11, color="black", fill=True, fill_color=ESA_SARI,
+                        fill_opacity=.95, weight=2,
+                        popup=folium.Popup(f"<b>Op {op}</b><br>Başlangıç noktası", max_width=160),
+                        tooltip=f"Op {op} başlangıç").add_to(m)
+    return m._repr_html_()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  RENDER FONKSİYONLARI  (günlük & haftalık ortak kullanır)
+# ═════════════════════════════════════════════════════════════════════════════
+def render_exec_summary(st_m, dyn_m, historical, jtype_map, st_s, dyn_s,
+                        cancelled, vpi=None, due_map=None):
+    due_map = due_map or {}
+    h_srv = h_km = h_cost = None
+    if historical:
+        h_srv = sum(v["n_served"] for v in historical.values())
+        h_km = sum(v["km"] for v in historical.values())
+        h_cost = sum(v["cost"] for v in historical.values())
+
+    model_cost = dyn_m["fuel"] + dyn_m["tard"]
+    ontime = (dyn_m["srv"] - dyn_m["late"]) / max(dyn_m["srv"], 1) * 100
+
+    cards = [
+        {"lbl": "Servis Edilen İş", "val": f"{dyn_m['srv']:,}", "cls": "good",
+         "sub": _delta_html(dyn_m["srv"], h_srv, lower_is_better=False)},
+        {"lbl": "Toplam Mesafe", "val": f"{dyn_m['km']:.0f} km", "cls": "",
+         "sub": _delta_html(dyn_m["km"], h_km, lower_is_better=True)},
+        {"lbl": "İşletme Maliyeti", "val": f"{model_cost:,.0f} ₺", "cls": "",
+         "sub": _delta_html(model_cost, h_cost, lower_is_better=True)},
+        {"lbl": "Zamanında Tamamlama", "val": f"%{ontime:.1f}", "cls": "alt",
+         "sub": f"{dyn_m['late']} iş gecikmeli"},
+    ]
+    hero_cards(cards)
+
+    # Tasarruf vurgusu
+    if historical and h_cost:
+        sav = h_cost - model_cost
+        sav_km = h_km - dyn_m["km"]
+        if sav > 0:
+            st.markdown(
+                f'<div class="esa-banner"><div><div class="t">≈ {sav:,.0f} ₺ tasarruf</div>'
+                f'<div class="s">Modelimiz gerçek operasyona kıyasla {sav_km:+.0f} km daha kısa rota üretti '
+                f've {dyn_m["srv"]-h_srv:+,} iş farkıyla çalıştı.</div></div></div>',
+                unsafe_allow_html=True)
+
+    # Karşılaştırma grafiği
+    st.markdown("#### Statik · Dinamik · Gerçek Karşılaştırması")
+    comp = [("Statik", st_m["srv"], st_m["km"], st_m["fuel"] + st_m["tard"], C_STATIC),
+            ("Dinamik (Model)", dyn_m["srv"], dyn_m["km"], model_cost, C_MODEL)]
+    if historical:
+        comp.append(("Gerçek", h_srv, h_km, h_cost, C_REAL))
+
+    if HAS_PLOTLY:
+        names = [c[0] for c in comp]; colors = [c[4] for c in comp]
+        fig = go.Figure()
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            f = go.Figure([go.Bar(x=names, y=[c[1] for c in comp], marker_color=colors,
+                                  text=[f"{c[1]:,}" for c in comp], textposition="outside")])
+            f.update_layout(title="Servis Edilen İş", height=300, plot_bgcolor="white",
+                            margin=dict(l=10, r=10, t=40, b=10), yaxis_title=None)
+            st.plotly_chart(f, use_container_width=True)
+        with c2:
+            f = go.Figure([go.Bar(x=names, y=[c[2] for c in comp], marker_color=colors,
+                                  text=[f"{c[2]:.0f}" for c in comp], textposition="outside")])
+            f.update_layout(title="Toplam km", height=300, plot_bgcolor="white",
+                            margin=dict(l=10, r=10, t=40, b=10))
+            st.plotly_chart(f, use_container_width=True)
+        with c3:
+            f = go.Figure([go.Bar(x=names, y=[c[3] for c in comp], marker_color=colors,
+                                  text=[f"{c[3]:,.0f}₺" for c in comp], textposition="outside")])
+            f.update_layout(title="İşletme Maliyeti (₺)", height=300, plot_bgcolor="white",
+                            margin=dict(l=10, r=10, t=40, b=10))
+            st.plotly_chart(f, use_container_width=True)
+    else:
+        st.bar_chart(pd.DataFrame({"Servis": [c[1] for c in comp]},
+                                  index=[c[0] for c in comp]))
+
+    # VPI
+    if vpi:
+        st.markdown("#### Tam Bilginin Değeri (VPI)")
+        v1, v2, v3 = st.columns(3)
+        v1.metric("Dinamik Kazanç (Fs→Fd)", f"%{vpi['dyn_imp']:.1f}")
+        v2.metric("VPI — Teorik Tavan (Fs→Ft)", f"%{vpi['vpi_imp']:.1f}")
+        v3.metric("VPI Yakalanma Oranı", f"%{vpi['eff']:.1f}")
+        st.caption("Fs: gün başı statik plan (referans %100)  |  Fd: dinamik modelimiz  |  "
+                   "Ft: tüm olaylar baştan bilinseydi elde edilecek teorik en iyi sonuç.")
+
+    # Tür bazında kapatma
+    st.markdown("#### İş Tipi Bazında Kapatma Oranları")
+    st_t = {}; dy_t = {}
+    for sch in st_s.values():
+        for j, s in sch.items():
+            t = jtype_map.get(j, "?"); st_t.setdefault(t, {"srv": 0, "tot": 0})
+            st_t[t]["tot"] += 1
+            if s.get("served"): st_t[t]["srv"] += 1
+    for sch in dyn_s.values():
+        for j, s in sch.items():
+            if j in cancelled: continue
+            t = jtype_map.get(j, "?"); dy_t.setdefault(t, {"srv": 0, "tot": 0})
+            dy_t[t]["tot"] += 1
+            if s.get("served"): dy_t[t]["srv"] += 1
+    rows = []
+    for t in sorted(set(list(st_t) + list(dy_t))):
+        s_ = st_t.get(t, {"srv": 0, "tot": 0}); d_ = dy_t.get(t, {"srv": 0, "tot": 0})
+        rows.append({"Tür": t, "Statik Servis": s_["srv"],
+                     "Statik %": f"{s_['srv']/max(s_['tot'],1)*100:.1f}%",
+                     "Dinamik Servis": d_["srv"],
+                     "Dinamik %": f"{d_['srv']/max(d_['tot'],1)*100:.1f}%"})
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+
+def render_dynamic_plan(dyn_r, dyn_s, op_ids, rs, coords):
+    st.markdown("#### İş Kapanış Zaman Çizelgesi (Gantt)")
+    st.caption("Her çubuk bir işin varış→tamamlanma aralığıdır. Mavi: zamanında, turuncu: gecikmeli. "
+               "Gri bant öğle molası (12:00–13:30).")
+    fig = build_gantt(dyn_r, dyn_s, op_ids)
+    if fig is not None:
+        st.plotly_chart(fig, use_container_width=True)
+    elif not HAS_PLOTLY:
+        st.warning("Zaman çizelgesi için `plotly` gerekli:  `pip install plotly`")
+    else:
+        st.info("Çizilecek servis edilmiş iş bulunamadı.")
+
+    st.markdown("#### Operatör Bazında Plan Özeti")
+    rows = []
+    for op in op_ids:
+        sch = dyn_s.get(op, {}); route = dyn_r.get(op, [])
+        served = [j for j in route if sch.get(j, {}).get("served")]
+        if served:
+            firsts = min(sch[j]["arrival"] for j in served)
+            lasts = max(sch[j]["finish"] for j in served)
+            ilk, son = dk2s(firsts), dk2s(lasts)
+        else:
+            ilk = son = "—"
+        late = sum(1 for j in served if sch[j].get("tardiness", 0) > 0)
+        rows.append({"Operatör": str(op), "Servis İş": len(served),
+                     "İlk İş": ilk, "Son Kapanış": son,
+                     "km": round(_rkm(route, rs[op], coords), 1),
+                     "Gecikmeli": late,
+                     "Yapılamayan": sum(1 for j in route if not sch.get(j, {}).get("served"))})
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+
+def render_op_compare(op_ids, dyn_r, dyn_s, rs, coords, historical, due_map, jtype_map,
+                      df, key_prefix=""):
+    st.markdown("#### Operatör Bazında — Gerçek vs Model")
+    st.caption("Aynı başlangıç noktasından, gerçek operatörün yaptığı rota ile modelimizin önerdiği rotanın "
+               "yan yana karşılaştırması.")
+    sel = st.selectbox("Operatör seçin:", [str(o) for o in op_ids], key=f"{key_prefix}_opsel")
+    op = next(o for o in op_ids if str(o) == sel)
+
+    m = op_model_stats(op, dyn_r, dyn_s, rs, coords)
+    h = historical.get(str(op)) or historical.get(op)
+    r_late, r_srv = real_late_count(op, historical, due_map)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Servis İş", f"{m['srv']}", (f"{m['srv']-h['n_served']:+}" if h else None),
+              help="Model − Gerçek")
+    c2.metric("Mesafe (km)", f"{m['km']:.1f}", (f"{m['km']-h['km']:+.1f}" if h else None),
+              delta_color="inverse")
+    c3.metric("İşletme ₺", f"{m['cost']:,.0f}", (f"{m['cost']-h['cost']:+,.0f}" if h else None),
+              delta_color="inverse")
+    c4.metric("Zamanında %",
+              f"%{(m['srv']-m['late'])/max(m['srv'],1)*100:.0f}",
+              (f"{((m['srv']-m['late'])/max(m['srv'],1)-(r_srv-r_late)/max(r_srv,1))*100:+.0f} puan" if h else None))
+
+    jtm = dict(zip(df["Sipariş No"], df["Sipariş Türü"])) if "Sipariş Türü" in df.columns else {}
+    col_map, col_gantt = st.columns([1, 1])
+    with col_map:
+        st.markdown("**Rota Karşılaştırma Haritası**")
+        html = make_overlay_map(op, dyn_r.get(op, []), dyn_s.get(op, {}), rs[op],
+                                coords, h, due_map, jtm)
+        components.html(html, height=460, scrolling=False)
+    with col_gantt:
+        st.markdown("**Model Plan — İş Kapanışları**")
+        fig = build_op_gantt(op, dyn_r.get(op, []), dyn_s.get(op, {}))
+        if fig is not None:
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Zaman çizelgesi yok.")
+
+    with st.expander("İş İş Kapanış Saatleri (Model)", expanded=False):
+        det = []
+        for seq, j in enumerate(dyn_r.get(op, []), 1):
+            s = dyn_s.get(op, {}).get(j, {})
+            if not s.get("served"): continue
+            det.append({"#": seq, "İş No": str(j), "Tür": jtype_map.get(j, "?"),
+                        "Varış": dk2s(s["arrival"]), "Kapanış": dk2s(s["finish"]),
+                        "Vade": dk2s(s.get("due", TEND)),
+                        "Gecikme": (f"{s['tardiness']:.0f} dk" if s.get("tardiness", 0) > 0 else "—")})
+        if det:
+            st.dataframe(pd.DataFrame(det), hide_index=True, use_container_width=True)
+
+    st.markdown("#### Tüm Operatörler — Model vs Gerçek Tablosu")
+    tdf = model_vs_real_table(op_ids, dyn_r, dyn_s, rs, coords, historical, due_map)
+    st.dataframe(tdf, hide_index=True, use_container_width=True)
+    if historical:
+        tot_sav = tdf["₺ Tasarruf"].dropna().sum()
+        st.caption(f"Karşılaştırılabilir operatörler toplam tasarrufu: **{tot_sav:,.0f} ₺**")
+
+
+def render_maps(st_r, st_s, dyn_r, dyn_s, op_ids, rs, coords, df, JP, due_map,
+                cancelled, new_asgn, historical, op_start_hint, height=560):
+    t1, t2, t3 = st.tabs(["🗺️ Dinamik (Model)", "🗺️ Statik Plan", "🗺️ Gerçek Operasyon"])
+    with t1:
+        st.caption(f"{sum(1 for sch in dyn_s.values() for s in sch.values() if s.get('served'))} iş servis | "
+                   f"{len(cancelled)} iptal | yeni işler beyaz noktayla işaretli")
+        html = make_map(dyn_r, dyn_s, op_ids, rs, coords, df,
+                        cancelled=cancelled, new_assigned=new_asgn, JP=JP, due_map=due_map)
+        components.html(html, height=height, scrolling=False)
+    with t2:
+        html = make_map(st_r, st_s, op_ids, rs, coords, df, JP=JP, due_map=due_map)
+        components.html(html, height=height, scrolling=False)
+    with t3:
+        if historical:
+            html = make_historical_map(historical, op_start_hint, df, due_map=due_map, JP=JP)
+            if html:
+                components.html(html, height=height, scrolling=False)
+            else:
+                st.info("Gerçek rota çizilemedi.")
+        else:
+            st.info("Bu veri setinde gerçek rota bilgisi (OK statüsü) bulunamadı.")
+
+
+def render_detail_tables(st_m, dyn_m, historical, dyn_s, cancelled, JP, due_map,
+                         jtype_map, rollover, due_exc):
+    st.markdown("#### İşletme Karşılaştırması")
+    st.caption("İşletme maliyeti = yakıt + gecikme cezası (yapılamayan işler hariç).")
+    rows = [
+        {"Senaryo": "Statik", "Servis": st_m["srv"], "km": round(st_m["km"], 1),
+         "km/iş": round(st_m["kpj"], 3), "Yakıt ₺": round(st_m["fuel"], 0),
+         "Gecikme ₺": round(st_m["tard"], 0), "İşletme ₺": round(st_m["fuel"] + st_m["tard"], 0),
+         "₺/iş": round((st_m["fuel"] + st_m["tard"]) / max(st_m["srv"], 1), 0)},
+        {"Senaryo": "Dinamik", "Servis": dyn_m["srv"], "km": round(dyn_m["km"], 1),
+         "km/iş": round(dyn_m["kpj"], 3), "Yakıt ₺": round(dyn_m["fuel"], 0),
+         "Gecikme ₺": round(dyn_m["tard"], 0), "İşletme ₺": round(dyn_m["fuel"] + dyn_m["tard"], 0),
+         "₺/iş": round((dyn_m["fuel"] + dyn_m["tard"]) / max(dyn_m["srv"], 1), 0)},
+    ]
+    if historical:
+        h_srv = sum(v["n_served"] for v in historical.values())
+        h_km = sum(v["km"] for v in historical.values())
+        h_tard = sum(v["tardy_pen"] for v in historical.values())
+        h_fuel = sum(v["fuel"] for v in historical.values())
+        rows.append({"Senaryo": "Gerçek", "Servis": h_srv, "km": round(h_km, 1),
+                     "km/iş": round(h_km / max(h_srv, 1), 3), "Yakıt ₺": round(h_fuel, 0),
+                     "Gecikme ₺": round(h_tard, 0), "İşletme ₺": round(h_fuel + h_tard, 0),
+                     "₺/iş": round((h_fuel + h_tard) / max(h_srv, 1), 0)})
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+    st.markdown("#### En Yüksek Cezalı Yapılamayan İşler (Dinamik)")
+    pen = []
+    for sch in dyn_s.values():
+        for jid, s in sch.items():
+            if not s.get("served") and jid not in cancelled:
+                pu_ = JP.get(jid, (0, 0, 50))[2]
+                pen.append({"İş No": str(jid), "Tür": jtype_map.get(jid, "?"),
+                            "Vade": dk2s(due_map.get(jid, TEND)), "p_u ₺": round(pu_, 0),
+                            "Toplam Ceza ₺": round(pu_ * (1 + rollover + (due_exc if due_map.get(jid, TEND) < TEND else 0)), 0)})
+    if pen:
+        top = sorted(pen, key=lambda r: r["Toplam Ceza ₺"], reverse=True)[:20]
+        st.dataframe(pd.DataFrame(top), hide_index=True, use_container_width=True)
+    else:
+        st.success("Yapılamayan iş bulunmuyor.")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  STREAMLIT ARAYÜZ
+# ═════════════════════════════════════════════════════════════════════════════
+st.set_page_config(page_title="EnerjiSA Rotalama & Karar Destek",
+                   layout="wide", page_icon="⚡")
+inject_css()
+
+st.sidebar.image(LOGO_URL, width=150)
 st.sidebar.markdown("### 📂 Veri")
-uploaded_file=st.sidebar.file_uploader("Excel dosyası yükle",type=['xlsx'])
+st.sidebar.caption("Günlük veya haftalık Excel yükleyin — format otomatik algılanır.")
+uploaded_file = st.sidebar.file_uploader("Excel dosyası yükle", type=["xlsx"])
 
 st.sidebar.markdown("### ⚙️ Parametreler")
-n_thr   =st.sidebar.number_input("Yeni iş tetikleyici N",1,100,20)
-prox_km =st.sidebar.number_input("Yakınlık eşiği km (0=kapalı)",0.0,5.0,0.3,0.1)
-commit_n=st.sidebar.number_input("Sabit ilk N iş",1,10,2)
-transfer=st.sidebar.number_input("Maks. atama km (0=kısıtsız)",0.0,10.0,3.0,0.5)
-alpha   =st.sidebar.slider("Öncelik-Mesafe Dengesi (Alpha)",0.0,1.0,0.5,0.05,
-                            help="0 = tamamen öncelik bazlı, 1 = tamamen mesafe bazlı")
-rollover=st.sidebar.number_input("Erteleme katsayısı",0.0,1.0,0.1,0.05)
-due_exc =st.sidebar.number_input("Vade aşımı katsayısı",0.0,1.0,0.3,0.05)
+n_thr    = st.sidebar.number_input("Yeni iş tetikleyici N", 1, 100, 20)
+prox_km  = st.sidebar.number_input("Yakınlık eşiği km (0=kapalı)", 0.0, 5.0, 0.3, 0.1)
+commit_n = st.sidebar.number_input("Sabit ilk N iş", 1, 10, 2)
+transfer = st.sidebar.number_input("Maks. atama km (0=kısıtsız)", 0.0, 10.0, 3.0, 0.5)
+alpha    = st.sidebar.slider("Öncelik-Mesafe Dengesi (Alpha)", 0.0, 1.0, 0.5, 0.05,
+                             help="0 = tamamen öncelik bazlı, 1 = tamamen mesafe bazlı")
+rollover = st.sidebar.number_input("Erteleme katsayısı", 0.0, 1.0, 0.1, 0.05)
+due_exc  = st.sidebar.number_input("Vade aşımı katsayısı", 0.0, 1.0, 0.3, 0.05)
 
-calistir=st.sidebar.button("🚀 Modeli Çalıştır",type="primary",use_container_width=True)
+calistir = st.sidebar.button("🚀 Modeli Çalıştır", type="primary", use_container_width=True)
 
-st.title("⚡ EnerjiSA Rotalama ve Karar Destek Sistemi")
-st.markdown("Statik plan, dinamik simülasyon ve gerçek operatör rotalarının karşılaştırmalı analizi.")
+# Başlık banner
+st.markdown(
+    f'<div class="esa-banner"><img src="{LOGO_URL}" height="46" style="background:#fff;border-radius:8px;padding:4px">'
+    f'<div><div class="t">Rotalama ve Karar Destek Sistemi</div>'
+    f'<div class="s">Dinamik atama · rota optimizasyonu · gerçek operasyonla karşılaştırmalı performans analizi</div></div>'
+    f'</div>', unsafe_allow_html=True)
 
 if not calistir:
     st.info("Sol menüden Excel dosyasını yükleyin ve **Modeli Çalıştır** butonuna basın.")
+    if not HAS_PLOTLY:
+        st.warning("Zaman çizelgeleri (Gantt) için `plotly` paketi önerilir:  `pip install plotly`")
     st.stop()
 
 if uploaded_file is None:
@@ -672,446 +1207,289 @@ if uploaded_file is None:
 
 with st.spinner("Veri yükleniyor..."):
     try:
-        df_raw,df,op_ids,op_coords,job_ids,coords,JP,due_map,jtype_map,jcre_map,fmt=load_from_upload(uploaded_file)
+        df_raw, df, op_ids, op_coords, job_ids, coords, JP, due_map, jtype_map, jcre_map, fmt = \
+            load_from_upload(uploaded_file)
     except Exception as e:
         st.error(f"Veri yükleme hatası: {e}")
         st.stop()
 
 st.sidebar.success(f"✓ {len(job_ids)} iş | Format: {fmt.upper()}")
 
-# ══════════════════════════════════════════════════════
-#  HAFTALIK VERİ AKIŞI
-# ══════════════════════════════════════════════════════
-if fmt=='weekly':
-    import datetime as _dt
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  HAFTALIK VERİ AKIŞI
+# ══════════════════════════════════════════════════════════════════════════════
+if fmt == "weekly":
     with st.spinner("Haftalık iş havuzu hazırlanıyor..."):
-        df_pool,pool_coords,pool_JP,pool_jtype,pool_jcre=build_job_pool(df_raw)
-        all_ids=set(df_pool['Sipariş No'])
+        df_pool, pool_coords, pool_JP, pool_jtype, pool_jcre = build_job_pool(df_raw)
+        all_ids = set(df_pool["Sipariş No"])
         coords.update(pool_coords); JP.update(pool_JP)
         jtype_map.update(pool_jtype); jcre_map.update(pool_jcre)
-        due_map.update({j:due_date_of(j,jtype_map,jcre_map) for j in all_ids})
-        df_raw['_date']=pd.to_datetime(df_raw['Yaratma Tarihi'],errors='coerce').dt.date
-        all_days=sorted(df_raw['_date'].dropna().unique())
-        work_days=[d for d in all_days if _dt.date.weekday(d)<5]
-        sim_days=work_days[-5:] if len(work_days)>=5 else work_days
-        backlog=set(df_raw[pd.to_datetime(df_raw['Yaratma Tarihi'],errors='coerce').dt.date
-                           .apply(lambda d: d<sim_days[0] if d else False)]['Sipariş No'])&all_ids
-        day_new={day:set(df_raw[pd.to_datetime(df_raw['Yaratma Tarihi'],errors='coerce').dt.date==day
-                                ]['Sipariş No'])&all_ids for day in sim_days}
+        due_map.update({j: due_date_of(j, jtype_map, jcre_map) for j in all_ids})
+        df_raw["_date"] = pd.to_datetime(df_raw["Yaratma Tarihi"], errors="coerce").dt.date
+        all_days = sorted(df_raw["_date"].dropna().unique())
+        work_days = [d for d in all_days if _dt.date.weekday(d) < 5]
+        sim_days = work_days[-5:] if len(work_days) >= 5 else work_days
+        backlog = set(df_raw[pd.to_datetime(df_raw["Yaratma Tarihi"], errors="coerce").dt.date
+                             .apply(lambda d: d < sim_days[0] if d else False)]["Sipariş No"]) & all_ids
+        day_new = {day: set(df_raw[pd.to_datetime(df_raw["Yaratma Tarihi"], errors="coerce").dt.date == day
+                                   ]["Sipariş No"]) & all_ids for day in sim_days}
 
-    p={'n_thr':int(n_thr),'prox_km':float(prox_km),'commit_n':int(commit_n),
-       'transfer_km':float(transfer),'alpha':float(alpha),'lb_w':0.3}
+    p = {"n_thr": int(n_thr), "prox_km": float(prox_km), "commit_n": int(commit_n),
+         "transfer_km": float(transfer), "alpha": float(alpha), "lb_w": 0.3}
 
     st.markdown(f"### 📅 Haftalık Simülasyon: {sim_days[0]} → {sim_days[-1]}")
-    st.caption(f"Backlog: {len(backlog)} iş | Sim. günleri: {len(sim_days)}")
+    st.caption(f"Backlog: {len(backlog)} iş | Simülasyon günleri: {len(sim_days)}")
 
-    progress=st.progress(0); status=st.empty()
-    day_results=[]; all_left={}; carryover=set(backlog)
+    progress = st.progress(0); status = st.empty()
+    day_results = []; all_left = {}; carryover = set(backlog)
 
-    for i,day in enumerate(sim_days):
+    for i, day in enumerate(sim_days):
         status.text(f"Gün {i+1}/{len(sim_days)}: {day} işleniyor...")
-        progress.progress((i)/len(sim_days))
+        progress.progress(i / len(sim_days))
 
-        today_new=day_new.get(day,set())
-        today_pre=set(); arrival_ev_today=[]
+        today_new = day_new.get(day, set())
+        today_pre = set(); arrival_ev_today = []
         for jid in today_new:
             if jid not in all_ids: continue
-            t_cre=jcre_map.get(jid,0)
-            if t_cre<=0: today_pre.add(jid)
+            t_cre = jcre_map.get(jid, 0)
+            if t_cre <= 0:
+                today_pre.add(jid)
             else:
-                arrival_ev_today.append({'t':t_cre,'job':jid})
-                if jid not in due_map or due_map[jid]<t_cre:
-                    due_map[jid]=due_date_of(jid,jtype_map,jcre_map,clamp=True)
-        arrival_ev_today.sort(key=lambda e:e['t'])
-        pool_ids=list((carryover|today_pre)&all_ids)
-        day_op_ids,day_op_coords=extract_day_ops(df_raw,day)
+                arrival_ev_today.append({"t": t_cre, "job": jid})
+                if jid not in due_map or due_map[jid] < t_cre:
+                    due_map[jid] = due_date_of(jid, jtype_map, jcre_map, clamp=True)
+        arrival_ev_today.sort(key=lambda e: e["t"])
+        pool_ids = list((carryover | today_pre) & all_ids)
+        day_op_ids, day_op_coords = extract_day_ops(df_raw, day)
 
         if not day_op_ids or not pool_ids:
-            day_results.append({'day':day,'srv':0,'km':0,'cancelled':0,
-                                 'n_carry':len(carryover),'n_pre':len(today_pre),
-                                 'n_in':len(arrival_ev_today),'n_ops':0,
-                                 'vpi':None,'carryover_n':len(carryover)})
+            day_results.append({"day": day, "srv": 0, "km": 0, "cancelled": 0,
+                                "n_carry": len(carryover), "n_pre": len(today_pre),
+                                "n_in": len(arrival_ev_today), "n_ops": 0,
+                                "vpi": None, "carryover_n": len(carryover)})
             continue
         try:
-            cans=build_cancel_pool(df_raw,day,set(pool_ids)|{e['job'] for e in arrival_ev_today})
-            out=sim_day_rolling(day,pool_ids,list(day_op_ids),dict(day_op_coords),
-                                coords,JP,due_map,jtype_map,cans,arrival_ev_today,p)
-            dyn_r,dyn_s,cancelled,new_asgn,n_r,st_r,st_s,rs,used_ops,op_jobs=out
+            cans = build_cancel_pool(df_raw, day, set(pool_ids) | {e["job"] for e in arrival_ev_today})
+            out = sim_day_rolling(day, pool_ids, list(day_op_ids), dict(day_op_coords),
+                                  coords, JP, due_map, jtype_map, cans, arrival_ev_today, p)
+            dyn_r, dyn_s, cancelled, new_asgn, n_r, st_r, st_s, rs, used_ops, op_jobs = out
         except Exception as e:
             st.warning(f"  {day} hatası: {e}")
-            day_results.append({'day':day,'srv':0,'km':0,'cancelled':0,
-                                 'n_carry':len(carryover),'n_pre':len(today_pre),
-                                 'n_in':len(arrival_ev_today),'n_ops':len(day_op_ids),
-                                 'vpi':None,'carryover_n':0})
+            day_results.append({"day": day, "srv": 0, "km": 0, "cancelled": 0,
+                                "n_carry": len(carryover), "n_pre": len(today_pre),
+                                "n_in": len(arrival_ev_today), "n_ops": len(day_op_ids),
+                                "vpi": None, "carryover_n": 0})
             continue
 
-        dm=metrics(dyn_r,dyn_s,used_ops,rs,coords,new_asgn,set(pool_ids))
+        dm = metrics(dyn_r, dyn_s, used_ops, rs, coords, new_asgn, set(pool_ids))
 
-        # VPI günlük
         try:
-            or_r,or_s,or_due,o_start=compute_oracle(
-                cans,arrival_ev_today,used_ops,rs,op_jobs,coords,JP,due_map,jtype_map,jcre_map)
-            f0c,_=total_cost(st_r,st_s,used_ops,rs,coords,JP,due_map,rollover,due_exc)
-            fdc,_=total_cost(dyn_r,dyn_s,used_ops,rs,coords,JP,due_map,rollover,due_exc)
-            fsc,_=total_cost(or_r,or_s,used_ops,o_start,coords,JP,or_due,rollover,due_exc)
-            new_pen=sum(JP.get(e['job'],(0,0,50))[2]*(1+rollover+(due_exc if due_map.get(e['job'],TEND)<TEND else 0))
-                        for e in arrival_ev_today if e['job'] in JP)
-            f0_aug=f0c+new_pen
-            def _p(c): return c/max(f0_aug,1)*100
-            def _i(c): return (f0_aug-c)/max(f0_aug,1)*100
-            vpi_row={'fs':_p(f0_aug),'fd':_p(fdc),'ft':_p(fsc),
-                     'dyn_imp':_i(fdc),'vpi_imp':_i(fsc),
-                     'eff':_i(fdc)/max(_i(fsc),0.001)*100}
+            or_r, or_s, or_due, o_start = compute_oracle(
+                cans, arrival_ev_today, used_ops, rs, op_jobs, coords, JP, due_map, jtype_map, jcre_map)
+            f0c, _ = total_cost(st_r, st_s, used_ops, rs, coords, JP, due_map, rollover, due_exc)
+            fdc, _ = total_cost(dyn_r, dyn_s, used_ops, rs, coords, JP, due_map, rollover, due_exc)
+            fsc, _ = total_cost(or_r, or_s, used_ops, o_start, coords, JP, or_due, rollover, due_exc)
+            new_pen = sum(JP.get(e["job"], (0, 0, 50))[2] * (1 + rollover + (due_exc if due_map.get(e["job"], TEND) < TEND else 0))
+                          for e in arrival_ev_today if e["job"] in JP)
+            f0_aug = f0c + new_pen
+            def _i(c): return (f0_aug - c) / max(f0_aug, 1) * 100
+            def _p(c): return c / max(f0_aug, 1) * 100
+            vpi_row = {"fs": _p(f0_aug), "fd": _p(fdc), "ft": _p(fsc),
+                       "dyn_imp": _i(fdc), "vpi_imp": _i(fsc),
+                       "eff": _i(fdc) / max(_i(fsc), 0.001) * 100}
         except Exception:
-            vpi_row=None
+            vpi_row = None
 
-        # Carryover
-        carryover=set()
+        carryover = set()
         for op_sch in dyn_s.values():
-            for jid,s in op_sch.items():
-                if not s.get('served') and jid not in cancelled: carryover.add(jid)
+            for jid, s in op_sch.items():
+                if not s.get("served") and jid not in cancelled: carryover.add(jid)
         for jid in pool_ids:
-            all_dyn={j for sch in dyn_s.values() for j in sch}
+            all_dyn = {j for sch in dyn_s.values() for j in sch}
             if jid not in all_dyn and jid not in cancelled: carryover.add(jid)
-
         for jid in carryover:
-            typ=jtype_map.get(jid,'?'); all_left[typ]=all_left.get(typ,0)+1
+            typ = jtype_map.get(jid, "?"); all_left[typ] = all_left.get(typ, 0) + 1
 
-        day_results.append({'day':day,'srv':dm['srv'],'km':dm['km'],
-                             'cancelled':len(cancelled),'n_carry':len(set(pool_ids)-today_pre),
-                             'n_pre':len(today_pre),'n_in':len(arrival_ev_today),
-                             'n_ops':len(used_ops),'vpi':vpi_row,
-                             'carryover_n':len(carryover),
-                             'routes':{   # harita için
-                                 'dyn_r':dyn_r,'dyn_s':dyn_s,
-                                 'st_r':st_r,'st_s':st_s,
-                                 'rs':rs,'op_ids':used_ops,
-                                 'new_asgn':new_asgn,'cancelled':cancelled,
-                             },
-                             'op_metrics':{
-                                 op:{
-                                     'srv':sum(1 for s in dyn_s.get(op,{}).values() if s.get('served')),
-                                     'km':_rkm(dyn_r.get(op,[]),rs[op],coords)
-                                 } for op in used_ops
-                             }})
+        day_results.append({"day": day, "srv": dm["srv"], "km": dm["km"],
+                            "cancelled": len(cancelled), "n_carry": len(set(pool_ids) - today_pre),
+                            "n_pre": len(today_pre), "n_in": len(arrival_ev_today),
+                            "n_ops": len(used_ops), "vpi": vpi_row,
+                            "carryover_n": len(carryover),
+                            "metrics": dm,
+                            "routes": {"dyn_r": dyn_r, "dyn_s": dyn_s, "st_r": st_r, "st_s": st_s,
+                                       "rs": rs, "op_ids": used_ops,
+                                       "new_asgn": new_asgn, "cancelled": cancelled,
+                                       "op_jobs": op_jobs}})
 
     progress.progress(1.0); status.text("Tamamlandı.")
 
-    # ── Haftalık çıktılar ──────────────────────────────────────────
-    st.markdown("### 📋 Günlük İş Akışı")
-    flow_rows=[]
-    for r in day_results:
-        bas=r['n_carry']+r['n_pre']; ekl=r['n_in']; ipt=r['cancelled']
-        srv=r['srv']; son=bas+ekl-ipt-srv
-        flow_rows.append({'Gün':str(r['day']),'Başlangıç':bas,'Eklenen':ekl,
-                          'İptal':ipt,'Servis':srv,'Son':son,'km':round(r['km'],1),'Op':r['n_ops']})
-    st.dataframe(pd.DataFrame(flow_rows),hide_index=True,use_container_width=True)
+    # ── Haftalık genel KPI ───────────────────────────────────────────
+    wk_srv = sum(r["srv"] for r in day_results)
+    wk_km = sum(r["km"] for r in day_results)
+    wk_cancel = sum(r["cancelled"] for r in day_results)
+    hero_cards([
+        {"lbl": "Haftalık Servis", "val": f"{wk_srv:,}", "cls": "good",
+         "sub": f"{len(sim_days)} iş günü"},
+        {"lbl": "Toplam Mesafe", "val": f"{wk_km:.0f} km", "cls": ""},
+        {"lbl": "Toplam İptal", "val": f"{wk_cancel:,}", "cls": "alt"},
+        {"lbl": "Hafta Sonu Kalan", "val": f"{sum(all_left.values()):,}", "cls": ""},
+    ])
 
-    vpi_rows=[r for r in day_results if r.get('vpi')]
+    # ── Günlük iş akışı ──────────────────────────────────────────────
+    st.markdown("### 📋 Günlük İş Akışı")
+    flow_rows = []
+    for r in day_results:
+        bas = r["n_carry"] + r["n_pre"]; ekl = r["n_in"]; ipt = r["cancelled"]
+        srv = r["srv"]; son = bas + ekl - ipt - srv
+        flow_rows.append({"Gün": str(r["day"]), "Başlangıç": bas, "Eklenen": ekl, "İptal": ipt,
+                          "Servis": srv, "Son": son, "km": round(r["km"], 1), "Op": r["n_ops"]})
+    st.dataframe(pd.DataFrame(flow_rows), hide_index=True, use_container_width=True)
+
+    if HAS_PLOTLY and flow_rows:
+        fdf = pd.DataFrame(flow_rows)
+        fig = go.Figure()
+        fig.add_bar(x=fdf["Gün"], y=fdf["Servis"], name="Servis", marker_color=C_MODEL)
+        fig.add_bar(x=fdf["Gün"], y=fdf["İptal"], name="İptal", marker_color=C_BAD)
+        fig.add_scatter(x=fdf["Gün"], y=fdf["km"], name="km", yaxis="y2",
+                        mode="lines+markers", line=dict(color=ESA_SARI_K, width=3))
+        fig.update_layout(barmode="group", height=340, plot_bgcolor="white",
+                          title="Günlük Servis / İptal / km", margin=dict(l=10, r=10, t=50, b=10),
+                          yaxis2=dict(overlaying="y", side="right", title="km"),
+                          legend=dict(orientation="h", y=1.05))
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ── VPI gün gün ──────────────────────────────────────────────────
+    vpi_rows = [r for r in day_results if r.get("vpi")]
     if vpi_rows:
         st.markdown("### 📈 VPI — Gün Gün")
-        vpi_data=[]
+        vpi_data = []
         for r in vpi_rows:
-            v=r['vpi']
-            vpi_data.append({'Gün':str(r['day']),
-                             'Fs (Statik %)':f"{v['fs']:.1f}%",
-                             'Fd (Dinamik %)':f"{v['fd']:.1f}%",
-                             'Ft (Tam Bilgi %)':f"{v['ft']:.1f}%",
-                             'Dinamik İyileşme':f"+{v['dyn_imp']:.1f}%",
-                             'VPI (Fs→Ft)':f"+{v['vpi_imp']:.1f}%",
-                             'Yakalanma %':f"{v['eff']:.1f}%"})
-        st.dataframe(pd.DataFrame(vpi_data),hide_index=True,use_container_width=True)
-        avg_dyn=sum(r['vpi']['dyn_imp'] for r in vpi_rows)/len(vpi_rows)
-        avg_vpi=sum(r['vpi']['vpi_imp'] for r in vpi_rows)/len(vpi_rows)
-        avg_eff=sum(r['vpi']['eff'] for r in vpi_rows)/len(vpi_rows)
-        col_a,col_b,col_c=st.columns(3)
-        col_a.metric("Haftalık ort. dinamik iyileşme",f"%{avg_dyn:.1f}")
-        col_b.metric("Haftalık ort. VPI",f"%{avg_vpi:.1f}")
-        col_c.metric("Haftalık ort. yakalanma",f"%{avg_eff:.1f}")
+            v = r["vpi"]
+            vpi_data.append({"Gün": str(r["day"]), "Fs (Statik %)": f"{v['fs']:.1f}%",
+                             "Fd (Dinamik %)": f"{v['fd']:.1f}%", "Ft (Tam Bilgi %)": f"{v['ft']:.1f}%",
+                             "Dinamik İyileşme": f"+{v['dyn_imp']:.1f}%", "VPI (Fs→Ft)": f"+{v['vpi_imp']:.1f}%",
+                             "Yakalanma %": f"{v['eff']:.1f}%"})
+        st.dataframe(pd.DataFrame(vpi_data), hide_index=True, use_container_width=True)
+        col_a, col_b, col_c = st.columns(3)
+        col_a.metric("Haftalık ort. dinamik iyileşme",
+                     f"%{sum(r['vpi']['dyn_imp'] for r in vpi_rows)/len(vpi_rows):.1f}")
+        col_b.metric("Haftalık ort. VPI",
+                     f"%{sum(r['vpi']['vpi_imp'] for r in vpi_rows)/len(vpi_rows):.1f}")
+        col_c.metric("Haftalık ort. yakalanma",
+                     f"%{sum(r['vpi']['eff'] for r in vpi_rows)/len(vpi_rows):.1f}")
 
     if all_left:
         st.markdown("### 📦 Hafta Sonu Kalan İşler (Tür Bazında)")
-        left_df=pd.DataFrame([{'Tür':t,'Kalan':c,
-                                'Oran':f"%{c/sum(all_left.values())*100:.1f}"}
-                               for t,c in sorted(all_left.items(),key=lambda x:-x[1])])
-        st.dataframe(left_df,hide_index=True,use_container_width=True)
+        left_df = pd.DataFrame([{"Tür": t, "Kalan": c, "Oran": f"%{c/sum(all_left.values())*100:.1f}"}
+                                for t, c in sorted(all_left.items(), key=lambda x: -x[1])])
+        st.dataframe(left_df, hide_index=True, use_container_width=True)
 
-    # ── Operatör başına dağılım histogramları ─────────────────────
-    op_days=[r for r in day_results if r.get('op_metrics')]
-    if op_days:
-        st.markdown("### 📊 Operatör Başına Dağılım — Gün Gün")
-        st.caption("Her operatörün günlük servis ettiği iş sayısı ve kat ettiği kilometre.")
-
-        for r in op_days:
-            om=r['op_metrics']
-            if not om: continue
-            day_label=str(r['day'])
-            ops_sorted=sorted(om.keys(),key=lambda o:om[o]['srv'],reverse=True)
-            srv_vals=[om[op]['srv'] for op in ops_sorted]
-            km_vals =[round(om[op]['km'],1) for op in ops_sorted]
-            op_labels=[str(op)[:8] for op in ops_sorted]
-
-            with st.expander(f"📅 {day_label} — {len(ops_sorted)} operatör, toplam {r['srv']} servis, {r['km']:.1f} km",
-                             expanded=False):
-                df_bar=pd.DataFrame({
-                    'Operatör': op_labels,
-                    'Servis edilen iş': srv_vals,
-                    'km': km_vals,
-                })
-
-                col_h1,col_h2=st.columns(2)
-
-                with col_h1:
-                    st.markdown("**Servis Edilen İş Sayısı**")
-                    srv_chart=pd.DataFrame({'Servis':srv_vals},index=op_labels)
-                    st.bar_chart(srv_chart,height=280,use_container_width=True)
-                    avg_srv=sum(srv_vals)/max(len(srv_vals),1)
-                    st.caption(f"Ort: {avg_srv:.1f} iş/op  |  Min: {min(srv_vals)}  |  Max: {max(srv_vals)}")
-
-                with col_h2:
-                    st.markdown("**Kat Edilen Kilometre**")
-                    km_chart=pd.DataFrame({'km':km_vals},index=op_labels)
-                    st.bar_chart(km_chart,height=280,use_container_width=True)
-                    avg_km=sum(km_vals)/max(len(km_vals),1)
-                    st.caption(f"Ort: {avg_km:.1f} km/op  |  Min: {min(km_vals)}  |  Max: {max(km_vals)}")
-
-                st.dataframe(df_bar.set_index('Operatör'),use_container_width=True)
-
-    # ── Haritalar (gün seçimli) ────────────────────────────────────
-    route_days=[r for r in day_results if r.get('routes')]
+    # ── Gün seçerek detaylı dashboard ────────────────────────────────
+    route_days = [r for r in day_results if r.get("routes")]
     if route_days:
-        st.markdown("### 🗺️ Haritalar")
-        day_options=[str(r['day']) for r in route_days]
-        chosen_day=st.selectbox("Görüntülenecek gün:",day_options,index=len(day_options)-1)
-        rd=next(r for r in route_days if str(r['day'])==chosen_day)
-        rv=rd['routes']
-        hist_day=reconstruct_historical(df_raw,due_map,JP,jtype_map)
-        map_tab1,map_tab2,map_tab3=st.tabs(["🗺️ Statik","🗺️ Dinamik","🗺️ Gerçek"])
-        with map_tab1:
-            st.caption(f"{chosen_day} — Statik Plan")
-            with st.spinner("Harita oluşturuluyor..."):
-                html=make_map(rv['st_r'],rv['st_s'],rv['op_ids'],rv['rs'],
-                              coords,df_pool,JP=JP,due_map=due_map)
-            components.html(html,height=550,scrolling=False)
-        with map_tab2:
-            st.caption(f"{chosen_day} — Dinamik Plan ({rd['n_ops']} op, {rd['srv']} servis, {rd['cancelled']} iptal)")
-            with st.spinner("Harita oluşturuluyor..."):
-                html=make_map(rv['dyn_r'],rv['dyn_s'],rv['op_ids'],rv['rs'],
-                              coords,df_pool,cancelled=rv['cancelled'],
-                              new_assigned=rv['new_asgn'],JP=JP,due_map=due_map)
-            components.html(html,height=550,scrolling=False)
-        with map_tab3:
-            st.caption(f"{chosen_day} — Gerçek Operatör Rotaları")
-            if hist_day:
-                with st.spinner("Harita oluşturuluyor..."):
-                    html=make_historical_map(hist_day,rv['rs'],df_pool,due_map=due_map,JP=JP)
-                if html: components.html(html,height=550,scrolling=False)
-            else:
-                st.info("Bu veri setinde gerçek rota bilgisi (OK statüsü) bulunamadı.")
+        st.markdown("---")
+        st.markdown("### 🔍 Gün Detayı — Yönetici Görünümü")
+        day_options = [str(r["day"]) for r in route_days]
+        chosen = st.selectbox("İncelenecek gün:", day_options, index=len(day_options) - 1,
+                              key="wk_day_detail")
+        rd = next(r for r in route_days if str(r["day"]) == chosen)
+        rv = rd["routes"]
+        day_obj = rd["day"]
+
+        # O güne ait gerçek rotalar
+        df_day_raw = df_raw[df_raw["_date"] == day_obj].copy()
+        hist_day = reconstruct_historical(df_day_raw, due_map, JP, jtype_map)
+
+        st_m_d = metrics(rv["st_r"], rv["st_s"], rv["op_ids"], rv["rs"], coords, set(), set())
+        dyn_m_d = rd["metrics"]
+
+        dtab1, dtab2, dtab3, dtab4 = st.tabs(
+            ["📊 Yönetici Özeti", "🕒 Dinamik Plan", "👤 Operatör Karşılaştırma", "🗺️ Haritalar"])
+        with dtab1:
+            render_exec_summary(st_m_d, dyn_m_d, hist_day, jtype_map, rv["st_s"], rv["dyn_s"],
+                                rv["cancelled"], vpi=rd.get("vpi"), due_map=due_map)
+        with dtab2:
+            render_dynamic_plan(rv["dyn_r"], rv["dyn_s"], rv["op_ids"], rv["rs"], coords)
+        with dtab3:
+            render_op_compare(rv["op_ids"], rv["dyn_r"], rv["dyn_s"], rv["rs"], coords,
+                              hist_day, due_map, jtype_map, df_pool, key_prefix=f"wk_{chosen}")
+        with dtab4:
+            render_maps(rv["st_r"], rv["st_s"], rv["dyn_r"], rv["dyn_s"], rv["op_ids"], rv["rs"],
+                        coords, df_pool, JP, due_map, rv["cancelled"], rv["new_asgn"],
+                        hist_day, rv["rs"])
 
     st.stop()
 
-# ══════════════════════════════════════════════════════
-#  GÜNLÜK VERİ AKIŞI (mevcut kod devam ediyor)
-# ══════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  GÜNLÜK VERİ AKIŞI
+# ══════════════════════════════════════════════════════════════════════════════
 with st.spinner("Statik plan hesaplanıyor..."):
-    labels,centers=kmeans_cluster(job_ids,coords,op_ids,op_coords)
-    c2o=macar_assign(centers,op_ids,op_coords)
-    op_jobs={op:[] for op in op_ids}
-    for jid,cl in labels.items(): op_jobs[c2o[cl]].append(jid)
-    op2cl={op:cl for cl,op in c2o.items()}
-    op_start={op:centers[op2cl[op]] for op in op_ids}
-    op_jobs=balance(op_jobs,op_ids,op_start,coords,JP)
-    st_r={}; st_s={}
+    labels, centers = kmeans_cluster(job_ids, coords, op_ids, op_coords)
+    c2o = macar_assign(centers, op_ids, op_coords)
+    op_jobs = {op: [] for op in op_ids}
+    for jid, cl in labels.items(): op_jobs[c2o[cl]].append(jid)
+    op2cl = {op: cl for cl, op in c2o.items()}
+    op_start = {op: centers[op2cl[op]] for op in op_ids}
+    op_jobs = balance(op_jobs, op_ids, op_start, coords, JP)
+    st_r = {}; st_s = {}
     for op in op_ids:
-        r,s,_=route_op(op,op_start[op],op_jobs[op],coords,JP,due_map,alpha=float(alpha))
-        st_r[op]=r; st_s[op]=s
-    orig_ids=set(job_ids)
-    cancel_ev,arrival_ev=build_events(df_raw,orig_ids,op_jobs,coords,JP,due_map,jtype_map,jcre_map)
+        r, s, _ = route_op(op, op_start[op], op_jobs[op], coords, JP, due_map, alpha=float(alpha))
+        st_r[op] = r; st_s[op] = s
+    orig_ids = set(job_ids)
+    cancel_ev, arrival_ev = build_events(df_raw, orig_ids, op_jobs, coords, JP, due_map, jtype_map, jcre_map)
 
 with st.spinner(f"Dinamik simülasyon çalışıyor ({len(cancel_ev)} iptal, {len(arrival_ev)} yeni iş)..."):
-    dyn_r,dyn_s,new_asgn,cancelled,n_reopt=simulate(
-        cancel_ev,arrival_ev,op_ids,op_start,op_jobs,coords,JP,due_map,st_r,st_s,
-        n_thr=int(n_thr),prox_km=float(prox_km),commit_n=int(commit_n),
-        transfer_km=float(transfer))
+    dyn_r, dyn_s, new_asgn, cancelled, n_reopt = simulate(
+        cancel_ev, arrival_ev, op_ids, op_start, op_jobs, coords, JP, due_map, st_r, st_s,
+        n_thr=int(n_thr), prox_km=float(prox_km), commit_n=int(commit_n), transfer_km=float(transfer))
 
+vpi_info = None
 with st.spinner("Oracle (VPI) hesaplanıyor..."):
     try:
-        or_r,or_s,or_due,o_start=compute_oracle(
-            cancel_ev,arrival_ev,op_ids,op_start,op_jobs,coords,JP,due_map,jtype_map,jcre_map)
-        f0c,f0k=total_cost(st_r,st_s,op_ids,op_start,coords,JP,due_map,rollover,due_exc)
-        fdc,fdk=total_cost(dyn_r,dyn_s,op_ids,op_start,coords,JP,due_map,rollover,due_exc)
-        fsc,fsk=total_cost(or_r,or_s,op_ids,o_start,coords,JP,or_due,rollover,due_exc)
-        new_pen=sum(JP.get(e['job'],(0,0,50))[2]*(1+rollover+(due_exc if due_map.get(e['job'],TEND)<TEND else 0))
-                    for e in arrival_ev if e['job'] in JP)
-        f0_aug=f0c+new_pen
-        oracle_ok=True
+        or_r, or_s, or_due, o_start = compute_oracle(
+            cancel_ev, arrival_ev, op_ids, op_start, op_jobs, coords, JP, due_map, jtype_map, jcre_map)
+        f0c, f0k = total_cost(st_r, st_s, op_ids, op_start, coords, JP, due_map, rollover, due_exc)
+        fdc, fdk = total_cost(dyn_r, dyn_s, op_ids, op_start, coords, JP, due_map, rollover, due_exc)
+        fsc, fsk = total_cost(or_r, or_s, op_ids, o_start, coords, JP, or_due, rollover, due_exc)
+        new_pen = sum(JP.get(e["job"], (0, 0, 50))[2] * (1 + rollover + (due_exc if due_map.get(e["job"], TEND) < TEND else 0))
+                      for e in arrival_ev if e["job"] in JP)
+        f0_aug = f0c + new_pen
+        def _imp(c): return (f0_aug - c) / max(f0_aug, 1) * 100
+        vpi_info = {"dyn_imp": _imp(fdc), "vpi_imp": _imp(fsc),
+                    "eff": _imp(fdc) / max(_imp(fsc), 0.001) * 100}
     except Exception:
-        oracle_ok=False
+        vpi_info = None
 
 with st.spinner("Gerçek rotalar yeniden oluşturuluyor..."):
-    historical=reconstruct_historical(df_raw,due_map,JP,jtype_map)
+    historical = reconstruct_historical(df_raw, due_map, JP, jtype_map)
 
-# ── Metrikler ──
-st_m =metrics(st_r,st_s,op_ids,op_start,coords,set(),orig_ids)
-dyn_m=metrics(dyn_r,dyn_s,op_ids,op_start,coords,new_asgn,orig_ids)
+st_m = metrics(st_r, st_s, op_ids, op_start, coords, set(), orig_ids)
+dyn_m = metrics(dyn_r, dyn_s, op_ids, op_start, coords, new_asgn, orig_ids)
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  SEKMELER
-# ─────────────────────────────────────────────────────────────────────────────
-tab1,tab2,tab3,tab4,tab5=st.tabs([
-    "📊 Özet & VPI","🗺️ Statik Harita","🗺️ Dinamik Harita",
-    "🗺️ Gerçek Harita","📋 Detay Tablolar"
-])
+st.success(f"✓ Simülasyon tamamlandı — {len(op_ids)} operatör, {n_reopt} yeniden rotalama, "
+           f"{len(cancelled)} iptal, {dyn_m['nsrv']} yeni iş dahil edildi.")
+
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "📊 Yönetici Özeti", "🕒 Dinamik Rota Planı", "👤 Operatör Karşılaştırma",
+    "🗺️ Haritalar", "📋 Detay Tablolar"])
 
 with tab1:
-    st.markdown("### Sonuç Özeti")
-    c1,c2,c3=st.columns(3)
-    with c1:
-        st.markdown("**Statik Plan**")
-        st.metric("Servis edilen",f"{st_m['srv']:,}",
-                  f"%{st_m['srv_pct']:.1f}")
-        st.metric("Km (eve dönüş hariç)",f"{st_m['km']:.1f}")
-        st.metric("Gecikme cezası",f"{st_m['tard']:,.0f} ₺")
-    with c2:
-        st.markdown("**Dinamik Plan**")
-        st.metric("Servis edilen",f"{dyn_m['srv']:,}",
-                  f"+{dyn_m['srv']-st_m['srv']} vs statik")
-        st.metric("Km",f"{dyn_m['km']:.1f}",
-                  f"{dyn_m['km']-st_m['km']:+.1f}")
-        st.metric("Yeniden rotalama",f"{n_reopt}")
-    with c3:
-        st.markdown("**Gerçek Operatörler**")
-        if historical:
-            h_srv=sum(v['n_served'] for v in historical.values())
-            h_km=sum(v['km'] for v in historical.values())
-            h_cost=sum(v['cost'] for v in historical.values())
-            st.metric("Tamamlanan",f"{h_srv:,}")
-            st.metric("Km",f"{h_km:.1f}")
-            st.metric("İşletme maliyeti",f"{h_cost:,.0f} ₺")
-        else:
-            st.info("Gerçek rota verisi bulunamadı.")
-
-    st.markdown("---")
-    if oracle_ok:
-        st.markdown("### Tam Bilginin Değeri (VPI)")
-        def pct(c): return c/max(f0_aug,1)*100
-        def imp(c): return (f0_aug-c)/max(f0_aug,1)*100
-        vpi_pct=imp(fsc); dyn_pct=imp(fdc); eff=dyn_pct/max(vpi_pct,0.001)*100
-        f0s=st_m['srv']; fds=dyn_m['srv']
-        fss=sum(sum(1 for s in sch.values() if s.get('served')) for sch in or_s.values())
-        vpi_df=pd.DataFrame([
-            {'Senaryo':'Fs — Statik Plan (referans %100)',
-             'Maliyet %':f"{pct(f0_aug):.1f}%",'İyileşme':'—','Servis':f0s},
-            {'Senaryo':'Fd — Dinamik Plan',
-             'Maliyet %':f"{pct(fdc):.1f}%",'İyileşme':f"+{dyn_pct:.1f}%",'Servis':fds},
-            {'Senaryo':'Ft — Tam Bilgi Planı (teorik en iyi)',
-             'Maliyet %':f"{pct(fsc):.1f}%",'İyileşme':f"+{vpi_pct:.1f}%",'Servis':fss},
-        ])
-        st.dataframe(vpi_df,hide_index=True,use_container_width=True)
-        col_a,col_b,col_c=st.columns(3)
-        col_a.metric("VPI (Fs→Ft tam bilgi değeri)",f"%{vpi_pct:.1f}")
-        col_b.metric("Dinamik kazanç (Fs→Fd)",f"%{dyn_pct:.1f}")
-        col_c.metric("VPI yakalanma oranı",f"%{eff:.1f}")
-        st.caption("Fs: gün başı statik plan + tüm yeni işler unserved (referans %100)  |  "
-                   "Fd: dinamik modelimiz  |  Ft: tüm olaylar baştan bilinse elde edilecek teorik en iyi")
-
-    # Tür bazında kapatma
-    st.markdown("---")
-    st.markdown("### İş Tipi Bazında Kapatma Yüzdeleri")
-    st_t={}; dy_t={}
-    for sch in st_s.values():
-        for j,s in sch.items():
-            typ=jtype_map.get(j,'?')
-            st_t.setdefault(typ,{'srv':0,'tot':0})
-            st_t[typ]['tot']+=1
-            if s.get('served'): st_t[typ]['srv']+=1
-    for sch in dyn_s.values():
-        for j,s in sch.items():
-            if j in cancelled: continue
-            typ=jtype_map.get(j,'?')
-            dy_t.setdefault(typ,{'srv':0,'tot':0})
-            dy_t[typ]['tot']+=1
-            if s.get('served'): dy_t[typ]['srv']+=1
-    rows=[]
-    for t in sorted(set(list(st_t)+list(dy_t))):
-        s_=st_t.get(t,{'srv':0,'tot':0}); d_=dy_t.get(t,{'srv':0,'tot':0})
-        rows.append({'Tür':t,
-                     'Statik Servis':s_['srv'],'Statik %':f"{s_['srv']/max(s_['tot'],1)*100:.1f}%",
-                     'Dinamik Servis':d_['srv'],'Dinamik %':f"{d_['srv']/max(d_['tot'],1)*100:.1f}%"})
-    st.dataframe(pd.DataFrame(rows),hide_index=True,use_container_width=True)
+    render_exec_summary(st_m, dyn_m, historical, jtype_map, st_s, dyn_s, cancelled,
+                        vpi=vpi_info, due_map=due_map)
 
 with tab2:
-    st.markdown("### Statik Plan Haritası")
-    st.caption(f"{st_m['srv']} iş servis edildi | {st_m['km']:.1f} km | {len(op_ids)} operatör")
-    with st.spinner("Harita oluşturuluyor..."):
-        html_st=make_map(st_r,st_s,op_ids,op_start,coords,df,JP=JP,due_map=due_map)
-    components.html(html_st,height=600,scrolling=False)
+    render_dynamic_plan(dyn_r, dyn_s, op_ids, op_start, coords)
 
 with tab3:
-    st.markdown("### Dinamik Plan Haritası")
-    st.caption(f"{dyn_m['srv']} iş servis edildi | {dyn_m['nsrv']} yeni iş dahil | "
-               f"{len(cancelled)} iptal | {n_reopt} yeniden rotalama")
-    with st.spinner("Harita oluşturuluyor..."):
-        html_dyn=make_map(dyn_r,dyn_s,op_ids,op_start,coords,df,
-                          cancelled=cancelled,new_assigned=new_asgn,JP=JP,due_map=due_map)
-    components.html(html_dyn,height=600,scrolling=False)
+    render_op_compare(op_ids, dyn_r, dyn_s, op_start, coords, historical, due_map,
+                      jtype_map, df, key_prefix="daily")
 
 with tab4:
-    st.markdown("### Gerçek Operatör Rotaları")
-    if historical:
-        h_srv=sum(v['n_served'] for v in historical.values())
-        h_km=sum(v['km'] for v in historical.values())
-        st.caption(f"{h_srv} iş tamamlandı | {h_km:.1f} km | {len(historical)} operatör")
-        with st.spinner("Harita oluşturuluyor..."):
-            html_hist=make_historical_map(historical,op_start,df,due_map=due_map,JP=JP)
-        if html_hist:
-            components.html(html_hist,height=600,scrolling=False)
-    else:
-        st.info("Veri setinde gerçek rota bilgisi (OK statüsü) bulunamadı.")
+    render_maps(st_r, st_s, dyn_r, dyn_s, op_ids, op_start, coords, df, JP, due_map,
+                cancelled, new_asgn, historical, op_start, height=600)
 
 with tab5:
-    st.markdown("### Statik vs Dinamik vs Gerçek — İşletme Karşılaştırması")
-    st.caption("İşletme maliyeti = yakıt + gecikme cezası (unserved dahil değil)")
-    if historical:
-        h_srv=sum(v['n_served'] for v in historical.values())
-        h_km=sum(v['km'] for v in historical.values())
-        h_tard=sum(v['tardy_pen'] for v in historical.values())
-        h_fuel=sum(v['fuel'] for v in historical.values())
-        h_cost=h_fuel+h_tard
-    comp_rows=[
-        {'Senaryo':'Statik','Servis':st_m['srv'],'km':round(st_m['km'],1),
-         'km/iş':round(st_m['kpj'],3),'Yakıt ₺':round(st_m['fuel'],0),
-         'Gecikme ₺':round(st_m['tard'],0),
-         'İşletme ₺':round(st_m['fuel']+st_m['tard'],0),
-         '₺/iş':round((st_m['fuel']+st_m['tard'])/max(st_m['srv'],1),0)},
-        {'Senaryo':'Dinamik','Servis':dyn_m['srv'],'km':round(dyn_m['km'],1),
-         'km/iş':round(dyn_m['kpj'],3),'Yakıt ₺':round(dyn_m['fuel'],0),
-         'Gecikme ₺':round(dyn_m['tard'],0),
-         'İşletme ₺':round(dyn_m['fuel']+dyn_m['tard'],0),
-         '₺/iş':round((dyn_m['fuel']+dyn_m['tard'])/max(dyn_m['srv'],1),0)},
-    ]
-    if historical:
-        comp_rows.append(
-            {'Senaryo':'Gerçek','Servis':h_srv,'km':round(h_km,1),
-             'km/iş':round(h_km/max(h_srv,1),3),'Yakıt ₺':round(h_fuel,0),
-             'Gecikme ₺':round(h_tard,0),'İşletme ₺':round(h_cost,0),
-             '₺/iş':round(h_cost/max(h_srv,1),0)})
-    st.dataframe(pd.DataFrame(comp_rows),hide_index=True,use_container_width=True)
-
-    st.markdown("---")
-    st.markdown("### En Yüksek Cezalı Yapılamayan İşler (Dinamik)")
-    pen_rows=[]
-    for sch in dyn_s.values():
-        for jid,s in sch.items():
-            if not s.get('served') and jid not in cancelled:
-                pu_=JP.get(jid,(0,0,50))[2]
-                pen_rows.append({'İş No':str(jid),'Tür':jtype_map.get(jid,'?'),
-                                  'Vade':dk2s(due_map.get(jid,TEND)),
-                                  'p_u ₺':round(pu_,0),
-                                  'Toplam Ceza ₺':round(pu_*(1+rollover+(due_exc if due_map.get(jid,TEND)<TEND else 0)),0)})
-    if pen_rows:
-        top=sorted(pen_rows,key=lambda r:r['Toplam Ceza ₺'],reverse=True)[:20]
-        st.dataframe(pd.DataFrame(top),hide_index=True,use_container_width=True)
+    render_detail_tables(st_m, dyn_m, historical, dyn_s, cancelled, JP, due_map,
+                         jtype_map, rollover, due_exc)
