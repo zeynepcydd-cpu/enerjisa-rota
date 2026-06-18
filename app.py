@@ -692,17 +692,43 @@ def inject_css():
       .esa-down {{ color:{C_BAD}; font-weight:700; }}
       .esa-flat {{ color:#6B7785; }}
       .esa-banner {{
-        background:linear-gradient(90deg,{ESA_MAVI} 0%, {ESA_MAVI_K} 100%);
-        color:#fff; border-radius:14px; padding:18px 22px; margin-bottom:10px;
+        background:linear-gradient(120deg,{ESA_MAVI_K} 0%, {ESA_MAVI} 55%, #0E6FB8 100%);
+        color:#fff; border-radius:16px; padding:20px 26px; margin:2px 0 18px 0;
         display:flex; align-items:center; gap:18px;
+        box-shadow:0 6px 22px rgba(0,90,160,.18);
       }}
-      .esa-banner .t {{ font-size:1.45rem; font-weight:800; }}
-      .esa-banner .s {{ opacity:.9; font-size:.95rem; }}
+      .esa-banner .t {{ font-size:1.5rem; font-weight:800; letter-spacing:-.01em; }}
+      .esa-banner .s {{ opacity:.92; font-size:.95rem; margin-top:2px; }}
+      .esa-logo {{
+        flex:0 0 auto; width:52px; height:52px; border-radius:13px;
+        background:{ESA_SARI}; color:{ESA_MAVI_K};
+        display:flex; align-items:center; justify-content:center;
+        font-size:1.7rem; font-weight:900;
+        box-shadow:0 2px 8px rgba(0,0,0,.18);
+      }}
+      .esa-side-logo {{
+        display:flex; align-items:center; gap:10px; margin:2px 0 14px 0;
+        font-weight:800; color:{ESA_MAVI_K}; font-size:1.15rem;
+      }}
+      .esa-side-logo .m {{
+        width:30px; height:30px; border-radius:8px; background:{ESA_SARI};
+        color:{ESA_MAVI_K}; display:flex; align-items:center; justify-content:center;
+        font-size:1.05rem; font-weight:900;
+      }}
+      .esa-side-logo .sub {{ font-size:.7rem; font-weight:600; color:#6B7785;
+        letter-spacing:.04em; text-transform:uppercase; }}
       .esa-pill {{ display:inline-block; background:{ESA_SARI}; color:#3a2a00;
         border-radius:20px; padding:3px 12px; font-weight:700; font-size:.85rem; }}
-      .stTabs [data-baseweb="tab-list"] {{ gap:4px; }}
-      .stTabs [data-baseweb="tab"] {{ font-weight:600; }}
-      div[data-testid="stMetricValue"] {{ font-size:1.5rem; }}
+      .stTabs [data-baseweb="tab-list"] {{ gap:6px; border-bottom:1px solid #E6E9EE; }}
+      .stTabs [data-baseweb="tab"] {{ font-weight:600; padding:8px 14px; }}
+      .stTabs [aria-selected="true"] {{ color:{ESA_MAVI}; }}
+      div[data-testid="stMetricValue"] {{ font-size:1.5rem; color:{ESA_MAVI_K}; }}
+      section[data-testid="stSidebar"] {{ background:#F7F9FC; border-right:1px solid #E6E9EE; }}
+      .stButton > button[kind="primary"] {{
+        background:{ESA_MAVI}; border:0; font-weight:700; border-radius:10px;
+        box-shadow:0 2px 8px rgba(0,90,160,.25);
+      }}
+      .stButton > button[kind="primary"]:hover {{ background:{ESA_MAVI_K}; }}
     </style>
     """, unsafe_allow_html=True)
 
@@ -1171,7 +1197,10 @@ st.set_page_config(page_title="EnerjiSA Rotalama & Karar Destek",
                    layout="wide", page_icon="⚡")
 inject_css()
 
-st.sidebar.image(LOGO_URL, width=150)
+st.sidebar.markdown(
+    '<div class="esa-side-logo"><div class="m">⚡</div>'
+    '<div>EnerjiSA<div class="sub">Rota &amp; Karar Destek</div></div></div>',
+    unsafe_allow_html=True)
 st.sidebar.markdown("### 📂 Veri")
 st.sidebar.caption("Günlük veya haftalık Excel yükleyin — format otomatik algılanır.")
 uploaded_file = st.sidebar.file_uploader("Excel dosyası yükle", type=["xlsx"])
@@ -1190,12 +1219,18 @@ calistir = st.sidebar.button("🚀 Modeli Çalıştır", type="primary", use_con
 
 # Başlık banner
 st.markdown(
-    f'<div class="esa-banner"><img src="{LOGO_URL}" height="46" style="background:#fff;border-radius:8px;padding:4px">'
-    f'<div><div class="t">Rotalama ve Karar Destek Sistemi</div>'
-    f'<div class="s">Dinamik atama · rota optimizasyonu · gerçek operasyonla karşılaştırmalı performans analizi</div></div>'
-    f'</div>', unsafe_allow_html=True)
+    '<div class="esa-banner"><div class="esa-logo">⚡</div>'
+    '<div><div class="t">Rotalama ve Karar Destek Sistemi</div>'
+    '<div class="s">Dinamik atama · rota optimizasyonu · gerçek operasyonla karşılaştırmalı performans analizi</div></div>'
+    '</div>', unsafe_allow_html=True)
 
-if not calistir:
+
+# Çalıştır durumunu kalıcı tut — gün/operatör seçimi sayfayı BAŞA ATMAZ
+if calistir:
+    st.session_state["esa_ran"] = True
+    st.session_state["esa_recompute"] = True   # buton: yeni parametrelerle hesapla
+
+if not st.session_state.get("esa_ran"):
     st.info("Sol menüden Excel dosyasını yükleyin ve **Modeli Çalıştır** butonuna basın.")
     if not HAS_PLOTLY:
         st.warning("Zaman çizelgeleri (Gantt) için `plotly` paketi önerilir:  `pip install plotly`")
@@ -1205,124 +1240,197 @@ if uploaded_file is None:
     st.error("Lütfen önce veri dosyasını yükleyin.")
     st.stop()
 
-with st.spinner("Veri yükleniyor..."):
-    try:
-        df_raw, df, op_ids, op_coords, job_ids, coords, JP, due_map, jtype_map, jcre_map, fmt = \
-            load_from_upload(uploaded_file)
-    except Exception as e:
-        st.error(f"Veri yükleme hatası: {e}")
-        st.stop()
+# Yeniden hesaplama YALNIZCA: buton basıldığında, ilk çalıştırmada veya dosya değişince.
+# Gün/operatör seçimi gibi etkileşimler önbellekten gelir → sayfa başa atmaz, beklemezsiniz.
+_file_id = (uploaded_file.name, getattr(uploaded_file, "size", 0))
+_need = (st.session_state.pop("esa_recompute", False)
+         or "esa_R" not in st.session_state
+         or st.session_state.get("esa_file") != _file_id)
 
-st.sidebar.success(f"✓ {len(job_ids)} iş | Format: {fmt.upper()}")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  HAFTALIK VERİ AKIŞI
-# ══════════════════════════════════════════════════════════════════════════════
-if fmt == "weekly":
-    with st.spinner("Haftalık iş havuzu hazırlanıyor..."):
-        df_pool, pool_coords, pool_JP, pool_jtype, pool_jcre = build_job_pool(df_raw)
-        all_ids = set(df_pool["Sipariş No"])
-        coords.update(pool_coords); JP.update(pool_JP)
-        jtype_map.update(pool_jtype); jcre_map.update(pool_jcre)
-        due_map.update({j: due_date_of(j, jtype_map, jcre_map) for j in all_ids})
-        df_raw["_date"] = pd.to_datetime(df_raw["Yaratma Tarihi"], errors="coerce").dt.date
-        all_days = sorted(df_raw["_date"].dropna().unique())
-        work_days = [d for d in all_days if _dt.date.weekday(d) < 5]
-        sim_days = work_days[-5:] if len(work_days) >= 5 else work_days
-        backlog = set(df_raw[pd.to_datetime(df_raw["Yaratma Tarihi"], errors="coerce").dt.date
-                             .apply(lambda d: d < sim_days[0] if d else False)]["Sipariş No"]) & all_ids
-        day_new = {day: set(df_raw[pd.to_datetime(df_raw["Yaratma Tarihi"], errors="coerce").dt.date == day
-                                   ]["Sipariş No"]) & all_ids for day in sim_days}
-
-    p = {"n_thr": int(n_thr), "prox_km": float(prox_km), "commit_n": int(commit_n),
-         "transfer_km": float(transfer), "alpha": float(alpha), "lb_w": 0.3}
-
-    st.markdown(f"### 📅 Haftalık Simülasyon: {sim_days[0]} → {sim_days[-1]}")
-    st.caption(f"Backlog: {len(backlog)} iş | Simülasyon günleri: {len(sim_days)}")
-
-    progress = st.progress(0); status = st.empty()
-    day_results = []; all_left = {}; carryover = set(backlog)
-
-    for i, day in enumerate(sim_days):
-        status.text(f"Gün {i+1}/{len(sim_days)}: {day} işleniyor...")
-        progress.progress(i / len(sim_days))
-
-        today_new = day_new.get(day, set())
-        today_pre = set(); arrival_ev_today = []
-        for jid in today_new:
-            if jid not in all_ids: continue
-            t_cre = jcre_map.get(jid, 0)
-            if t_cre <= 0:
-                today_pre.add(jid)
-            else:
-                arrival_ev_today.append({"t": t_cre, "job": jid})
-                if jid not in due_map or due_map[jid] < t_cre:
-                    due_map[jid] = due_date_of(jid, jtype_map, jcre_map, clamp=True)
-        arrival_ev_today.sort(key=lambda e: e["t"])
-        pool_ids = list((carryover | today_pre) & all_ids)
-        day_op_ids, day_op_coords = extract_day_ops(df_raw, day)
-
-        if not day_op_ids or not pool_ids:
-            day_results.append({"day": day, "srv": 0, "km": 0, "cancelled": 0,
-                                "n_carry": len(carryover), "n_pre": len(today_pre),
-                                "n_in": len(arrival_ev_today), "n_ops": 0,
-                                "vpi": None, "carryover_n": len(carryover)})
-            continue
+if _need:
+    with st.spinner("Veri yükleniyor..."):
         try:
-            cans = build_cancel_pool(df_raw, day, set(pool_ids) | {e["job"] for e in arrival_ev_today})
-            out = sim_day_rolling(day, pool_ids, list(day_op_ids), dict(day_op_coords),
-                                  coords, JP, due_map, jtype_map, cans, arrival_ev_today, p)
-            dyn_r, dyn_s, cancelled, new_asgn, n_r, st_r, st_s, rs, used_ops, op_jobs = out
+            df_raw, df, op_ids, op_coords, job_ids, coords, JP, due_map, jtype_map, jcre_map, fmt = \
+                load_from_upload(uploaded_file)
         except Exception as e:
-            st.warning(f"  {day} hatası: {e}")
-            day_results.append({"day": day, "srv": 0, "km": 0, "cancelled": 0,
-                                "n_carry": len(carryover), "n_pre": len(today_pre),
-                                "n_in": len(arrival_ev_today), "n_ops": len(day_op_ids),
-                                "vpi": None, "carryover_n": 0})
-            continue
+            st.error(f"Veri yükleme hatası: {e}")
+            st.stop()
 
-        dm = metrics(dyn_r, dyn_s, used_ops, rs, coords, new_asgn, set(pool_ids))
+    _R = {"fmt": fmt, "n_jobs": len(job_ids)}
 
-        try:
-            or_r, or_s, or_due, o_start = compute_oracle(
-                cans, arrival_ev_today, used_ops, rs, op_jobs, coords, JP, due_map, jtype_map, jcre_map)
-            f0c, _ = total_cost(st_r, st_s, used_ops, rs, coords, JP, due_map, rollover, due_exc)
-            fdc, _ = total_cost(dyn_r, dyn_s, used_ops, rs, coords, JP, due_map, rollover, due_exc)
-            fsc, _ = total_cost(or_r, or_s, used_ops, o_start, coords, JP, or_due, rollover, due_exc)
-            new_pen = sum(JP.get(e["job"], (0, 0, 50))[2] * (1 + rollover + (due_exc if due_map.get(e["job"], TEND) < TEND else 0))
-                          for e in arrival_ev_today if e["job"] in JP)
-            f0_aug = f0c + new_pen
-            def _i(c): return (f0_aug - c) / max(f0_aug, 1) * 100
-            def _p(c): return c / max(f0_aug, 1) * 100
-            vpi_row = {"fs": _p(f0_aug), "fd": _p(fdc), "ft": _p(fsc),
-                       "dyn_imp": _i(fdc), "vpi_imp": _i(fsc),
-                       "eff": _i(fdc) / max(_i(fsc), 0.001) * 100}
-        except Exception:
-            vpi_row = None
+    if fmt == "weekly":
 
-        carryover = set()
-        for op_sch in dyn_s.values():
-            for jid, s in op_sch.items():
-                if not s.get("served") and jid not in cancelled: carryover.add(jid)
-        for jid in pool_ids:
-            all_dyn = {j for sch in dyn_s.values() for j in sch}
-            if jid not in all_dyn and jid not in cancelled: carryover.add(jid)
-        for jid in carryover:
-            typ = jtype_map.get(jid, "?"); all_left[typ] = all_left.get(typ, 0) + 1
+        with st.spinner("Haftalık iş havuzu hazırlanıyor..."):
+            df_pool, pool_coords, pool_JP, pool_jtype, pool_jcre = build_job_pool(df_raw)
+            all_ids = set(df_pool["Sipariş No"])
+            coords.update(pool_coords); JP.update(pool_JP)
+            jtype_map.update(pool_jtype); jcre_map.update(pool_jcre)
+            due_map.update({j: due_date_of(j, jtype_map, jcre_map) for j in all_ids})
+            df_raw["_date"] = pd.to_datetime(df_raw["Yaratma Tarihi"], errors="coerce").dt.date
+            all_days = sorted(df_raw["_date"].dropna().unique())
+            work_days = [d for d in all_days if _dt.date.weekday(d) < 5]
+            sim_days = work_days[-5:] if len(work_days) >= 5 else work_days
+            backlog = set(df_raw[pd.to_datetime(df_raw["Yaratma Tarihi"], errors="coerce").dt.date
+                                 .apply(lambda d: d < sim_days[0] if d else False)]["Sipariş No"]) & all_ids
+            day_new = {day: set(df_raw[pd.to_datetime(df_raw["Yaratma Tarihi"], errors="coerce").dt.date == day
+                                       ]["Sipariş No"]) & all_ids for day in sim_days}
 
-        day_results.append({"day": day, "srv": dm["srv"], "km": dm["km"],
-                            "cancelled": len(cancelled), "n_carry": len(set(pool_ids) - today_pre),
-                            "n_pre": len(today_pre), "n_in": len(arrival_ev_today),
-                            "n_ops": len(used_ops), "vpi": vpi_row,
-                            "carryover_n": len(carryover),
-                            "metrics": dm,
-                            "routes": {"dyn_r": dyn_r, "dyn_s": dyn_s, "st_r": st_r, "st_s": st_s,
-                                       "rs": rs, "op_ids": used_ops,
-                                       "new_asgn": new_asgn, "cancelled": cancelled,
-                                       "op_jobs": op_jobs}})
+        p = {"n_thr": int(n_thr), "prox_km": float(prox_km), "commit_n": int(commit_n),
+             "transfer_km": float(transfer), "alpha": float(alpha), "lb_w": 0.3}
 
-    progress.progress(1.0); status.text("Tamamlandı.")
+        st.markdown(f"### 📅 Haftalık Simülasyon: {sim_days[0]} → {sim_days[-1]}")
+        st.caption(f"Backlog: {len(backlog)} iş | Simülasyon günleri: {len(sim_days)}")
+
+        progress = st.progress(0); status = st.empty()
+        day_results = []; all_left = {}; carryover = set(backlog)
+
+        for i, day in enumerate(sim_days):
+            status.text(f"Gün {i+1}/{len(sim_days)}: {day} işleniyor...")
+            progress.progress(i / len(sim_days))
+
+            today_new = day_new.get(day, set())
+            today_pre = set(); arrival_ev_today = []
+            for jid in today_new:
+                if jid not in all_ids: continue
+                t_cre = jcre_map.get(jid, 0)
+                if t_cre <= 0:
+                    today_pre.add(jid)
+                else:
+                    arrival_ev_today.append({"t": t_cre, "job": jid})
+                    if jid not in due_map or due_map[jid] < t_cre:
+                        due_map[jid] = due_date_of(jid, jtype_map, jcre_map, clamp=True)
+            arrival_ev_today.sort(key=lambda e: e["t"])
+            pool_ids = list((carryover | today_pre) & all_ids)
+            day_op_ids, day_op_coords = extract_day_ops(df_raw, day)
+
+            if not day_op_ids or not pool_ids:
+                day_results.append({"day": day, "srv": 0, "km": 0, "cancelled": 0,
+                                    "n_carry": len(carryover), "n_pre": len(today_pre),
+                                    "n_in": len(arrival_ev_today), "n_ops": 0,
+                                    "vpi": None, "carryover_n": len(carryover)})
+                continue
+            try:
+                cans = build_cancel_pool(df_raw, day, set(pool_ids) | {e["job"] for e in arrival_ev_today})
+                out = sim_day_rolling(day, pool_ids, list(day_op_ids), dict(day_op_coords),
+                                      coords, JP, due_map, jtype_map, cans, arrival_ev_today, p)
+                dyn_r, dyn_s, cancelled, new_asgn, n_r, st_r, st_s, rs, used_ops, op_jobs = out
+            except Exception as e:
+                st.warning(f"  {day} hatası: {e}")
+                day_results.append({"day": day, "srv": 0, "km": 0, "cancelled": 0,
+                                    "n_carry": len(carryover), "n_pre": len(today_pre),
+                                    "n_in": len(arrival_ev_today), "n_ops": len(day_op_ids),
+                                    "vpi": None, "carryover_n": 0})
+                continue
+
+            dm = metrics(dyn_r, dyn_s, used_ops, rs, coords, new_asgn, set(pool_ids))
+
+            try:
+                or_r, or_s, or_due, o_start = compute_oracle(
+                    cans, arrival_ev_today, used_ops, rs, op_jobs, coords, JP, due_map, jtype_map, jcre_map)
+                f0c, _ = total_cost(st_r, st_s, used_ops, rs, coords, JP, due_map, rollover, due_exc)
+                fdc, _ = total_cost(dyn_r, dyn_s, used_ops, rs, coords, JP, due_map, rollover, due_exc)
+                fsc, _ = total_cost(or_r, or_s, used_ops, o_start, coords, JP, or_due, rollover, due_exc)
+                new_pen = sum(JP.get(e["job"], (0, 0, 50))[2] * (1 + rollover + (due_exc if due_map.get(e["job"], TEND) < TEND else 0))
+                              for e in arrival_ev_today if e["job"] in JP)
+                f0_aug = f0c + new_pen
+                def _i(c): return (f0_aug - c) / max(f0_aug, 1) * 100
+                def _p(c): return c / max(f0_aug, 1) * 100
+                vpi_row = {"fs": _p(f0_aug), "fd": _p(fdc), "ft": _p(fsc),
+                           "dyn_imp": _i(fdc), "vpi_imp": _i(fsc),
+                           "eff": _i(fdc) / max(_i(fsc), 0.001) * 100}
+            except Exception:
+                vpi_row = None
+
+            carryover = set()
+            for op_sch in dyn_s.values():
+                for jid, s in op_sch.items():
+                    if not s.get("served") and jid not in cancelled: carryover.add(jid)
+            for jid in pool_ids:
+                all_dyn = {j for sch in dyn_s.values() for j in sch}
+                if jid not in all_dyn and jid not in cancelled: carryover.add(jid)
+            for jid in carryover:
+                typ = jtype_map.get(jid, "?"); all_left[typ] = all_left.get(typ, 0) + 1
+
+            day_results.append({"day": day, "srv": dm["srv"], "km": dm["km"],
+                                "cancelled": len(cancelled), "n_carry": len(set(pool_ids) - today_pre),
+                                "n_pre": len(today_pre), "n_in": len(arrival_ev_today),
+                                "n_ops": len(used_ops), "vpi": vpi_row,
+                                "carryover_n": len(carryover),
+                                "metrics": dm,
+                                "routes": {"dyn_r": dyn_r, "dyn_s": dyn_s, "st_r": st_r, "st_s": st_s,
+                                           "rs": rs, "op_ids": used_ops,
+                                           "new_asgn": new_asgn, "cancelled": cancelled,
+                                           "op_jobs": op_jobs}})
+
+        progress.progress(1.0); status.text("Tamamlandı.")
+        _R.update(dict(day_results=day_results, all_left=all_left, sim_days=sim_days,
+                       backlog=backlog, df_raw=df_raw, due_map=due_map, JP=JP,
+                       jtype_map=jtype_map, coords=coords, df_pool=df_pool))
+    else:
+
+        with st.spinner("Statik plan hesaplanıyor..."):
+            labels, centers = kmeans_cluster(job_ids, coords, op_ids, op_coords)
+            c2o = macar_assign(centers, op_ids, op_coords)
+            op_jobs = {op: [] for op in op_ids}
+            for jid, cl in labels.items(): op_jobs[c2o[cl]].append(jid)
+            op2cl = {op: cl for cl, op in c2o.items()}
+            op_start = {op: centers[op2cl[op]] for op in op_ids}
+            op_jobs = balance(op_jobs, op_ids, op_start, coords, JP)
+            st_r = {}; st_s = {}
+            for op in op_ids:
+                r, s, _ = route_op(op, op_start[op], op_jobs[op], coords, JP, due_map, alpha=float(alpha))
+                st_r[op] = r; st_s[op] = s
+            orig_ids = set(job_ids)
+            cancel_ev, arrival_ev = build_events(df_raw, orig_ids, op_jobs, coords, JP, due_map, jtype_map, jcre_map)
+
+        with st.spinner(f"Dinamik simülasyon çalışıyor ({len(cancel_ev)} iptal, {len(arrival_ev)} yeni iş)..."):
+            dyn_r, dyn_s, new_asgn, cancelled, n_reopt = simulate(
+                cancel_ev, arrival_ev, op_ids, op_start, op_jobs, coords, JP, due_map, st_r, st_s,
+                n_thr=int(n_thr), prox_km=float(prox_km), commit_n=int(commit_n), transfer_km=float(transfer))
+
+        vpi_info = None
+        with st.spinner("Oracle (VPI) hesaplanıyor..."):
+            try:
+                or_r, or_s, or_due, o_start = compute_oracle(
+                    cancel_ev, arrival_ev, op_ids, op_start, op_jobs, coords, JP, due_map, jtype_map, jcre_map)
+                f0c, f0k = total_cost(st_r, st_s, op_ids, op_start, coords, JP, due_map, rollover, due_exc)
+                fdc, fdk = total_cost(dyn_r, dyn_s, op_ids, op_start, coords, JP, due_map, rollover, due_exc)
+                fsc, fsk = total_cost(or_r, or_s, op_ids, o_start, coords, JP, or_due, rollover, due_exc)
+                new_pen = sum(JP.get(e["job"], (0, 0, 50))[2] * (1 + rollover + (due_exc if due_map.get(e["job"], TEND) < TEND else 0))
+                              for e in arrival_ev if e["job"] in JP)
+                f0_aug = f0c + new_pen
+                def _imp(c): return (f0_aug - c) / max(f0_aug, 1) * 100
+                vpi_info = {"dyn_imp": _imp(fdc), "vpi_imp": _imp(fsc),
+                            "eff": _imp(fdc) / max(_imp(fsc), 0.001) * 100}
+            except Exception:
+                vpi_info = None
+
+        with st.spinner("Gerçek rotalar yeniden oluşturuluyor..."):
+            historical = reconstruct_historical(df_raw, due_map, JP, jtype_map)
+
+        st_m = metrics(st_r, st_s, op_ids, op_start, coords, set(), orig_ids)
+        dyn_m = metrics(dyn_r, dyn_s, op_ids, op_start, coords, new_asgn, orig_ids)
+        _R.update(dict(st_r=st_r, st_s=st_s, dyn_r=dyn_r, dyn_s=dyn_s, op_ids=op_ids,
+                       op_start=op_start, coords=coords, df=df, JP=JP, due_map=due_map,
+                       jtype_map=jtype_map, historical=historical, cancelled=cancelled,
+                       new_asgn=new_asgn, n_reopt=n_reopt, vpi_info=vpi_info,
+                       st_m=st_m, dyn_m=dyn_m, rollover=float(rollover), due_exc=float(due_exc)))
+
+    st.session_state["esa_R"] = _R
+    st.session_state["esa_file"] = _file_id
+
+R = st.session_state["esa_R"]
+fmt = R["fmt"]
+st.sidebar.success(f"✓ {R['n_jobs']} iş | Format: {fmt.upper()}")
+
+
+# ═════════════════════════════════════════
+#  SONUÇLARI GÖSTER (önbellekten — gün/operatör seçimi anında)
+# ═════════════════════════════════════════
+if fmt == "weekly":
+    day_results = R["day_results"]; all_left = R["all_left"]; sim_days = R["sim_days"]
+    backlog = R["backlog"]; df_raw = R["df_raw"]; due_map = R["due_map"]; JP = R["JP"]
+    jtype_map = R["jtype_map"]; coords = R["coords"]; df_pool = R["df_pool"]
 
     # ── Haftalık genel KPI ───────────────────────────────────────────
     wk_srv = sum(r["srv"] for r in day_results)
@@ -1418,78 +1526,36 @@ if fmt == "weekly":
             render_maps(rv["st_r"], rv["st_s"], rv["dyn_r"], rv["dyn_s"], rv["op_ids"], rv["rs"],
                         coords, df_pool, JP, due_map, rv["cancelled"], rv["new_asgn"],
                         hist_day, rv["rs"])
+else:
+    st_r = R["st_r"]; st_s = R["st_s"]; dyn_r = R["dyn_r"]; dyn_s = R["dyn_s"]
+    op_ids = R["op_ids"]; op_start = R["op_start"]; coords = R["coords"]; df = R["df"]
+    JP = R["JP"]; due_map = R["due_map"]; jtype_map = R["jtype_map"]
+    historical = R["historical"]; cancelled = R["cancelled"]; new_asgn = R["new_asgn"]
+    n_reopt = R["n_reopt"]; vpi_info = R["vpi_info"]; st_m = R["st_m"]; dyn_m = R["dyn_m"]
+    rollover = R["rollover"]; due_exc = R["due_exc"]
 
-    st.stop()
+    st.success(f"✓ Simülasyon tamamlandı — {len(op_ids)} operatör, {n_reopt} yeniden rotalama, "
+               f"{len(cancelled)} iptal, {dyn_m['nsrv']} yeni iş dahil edildi.")
 
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📊 Yönetici Özeti", "🕒 Dinamik Rota Planı", "👤 Operatör Karşılaştırma",
+        "🗺️ Haritalar", "📋 Detay Tablolar"])
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  GÜNLÜK VERİ AKIŞI
-# ══════════════════════════════════════════════════════════════════════════════
-with st.spinner("Statik plan hesaplanıyor..."):
-    labels, centers = kmeans_cluster(job_ids, coords, op_ids, op_coords)
-    c2o = macar_assign(centers, op_ids, op_coords)
-    op_jobs = {op: [] for op in op_ids}
-    for jid, cl in labels.items(): op_jobs[c2o[cl]].append(jid)
-    op2cl = {op: cl for cl, op in c2o.items()}
-    op_start = {op: centers[op2cl[op]] for op in op_ids}
-    op_jobs = balance(op_jobs, op_ids, op_start, coords, JP)
-    st_r = {}; st_s = {}
-    for op in op_ids:
-        r, s, _ = route_op(op, op_start[op], op_jobs[op], coords, JP, due_map, alpha=float(alpha))
-        st_r[op] = r; st_s[op] = s
-    orig_ids = set(job_ids)
-    cancel_ev, arrival_ev = build_events(df_raw, orig_ids, op_jobs, coords, JP, due_map, jtype_map, jcre_map)
+    with tab1:
+        render_exec_summary(st_m, dyn_m, historical, jtype_map, st_s, dyn_s, cancelled,
+                            vpi=vpi_info, due_map=due_map)
 
-with st.spinner(f"Dinamik simülasyon çalışıyor ({len(cancel_ev)} iptal, {len(arrival_ev)} yeni iş)..."):
-    dyn_r, dyn_s, new_asgn, cancelled, n_reopt = simulate(
-        cancel_ev, arrival_ev, op_ids, op_start, op_jobs, coords, JP, due_map, st_r, st_s,
-        n_thr=int(n_thr), prox_km=float(prox_km), commit_n=int(commit_n), transfer_km=float(transfer))
+    with tab2:
+        render_dynamic_plan(dyn_r, dyn_s, op_ids, op_start, coords)
 
-vpi_info = None
-with st.spinner("Oracle (VPI) hesaplanıyor..."):
-    try:
-        or_r, or_s, or_due, o_start = compute_oracle(
-            cancel_ev, arrival_ev, op_ids, op_start, op_jobs, coords, JP, due_map, jtype_map, jcre_map)
-        f0c, f0k = total_cost(st_r, st_s, op_ids, op_start, coords, JP, due_map, rollover, due_exc)
-        fdc, fdk = total_cost(dyn_r, dyn_s, op_ids, op_start, coords, JP, due_map, rollover, due_exc)
-        fsc, fsk = total_cost(or_r, or_s, op_ids, o_start, coords, JP, or_due, rollover, due_exc)
-        new_pen = sum(JP.get(e["job"], (0, 0, 50))[2] * (1 + rollover + (due_exc if due_map.get(e["job"], TEND) < TEND else 0))
-                      for e in arrival_ev if e["job"] in JP)
-        f0_aug = f0c + new_pen
-        def _imp(c): return (f0_aug - c) / max(f0_aug, 1) * 100
-        vpi_info = {"dyn_imp": _imp(fdc), "vpi_imp": _imp(fsc),
-                    "eff": _imp(fdc) / max(_imp(fsc), 0.001) * 100}
-    except Exception:
-        vpi_info = None
+    with tab3:
+        render_op_compare(op_ids, dyn_r, dyn_s, op_start, coords, historical, due_map,
+                          jtype_map, df, key_prefix="daily")
 
-with st.spinner("Gerçek rotalar yeniden oluşturuluyor..."):
-    historical = reconstruct_historical(df_raw, due_map, JP, jtype_map)
+    with tab4:
+        render_maps(st_r, st_s, dyn_r, dyn_s, op_ids, op_start, coords, df, JP, due_map,
+                    cancelled, new_asgn, historical, op_start, height=600)
 
-st_m = metrics(st_r, st_s, op_ids, op_start, coords, set(), orig_ids)
-dyn_m = metrics(dyn_r, dyn_s, op_ids, op_start, coords, new_asgn, orig_ids)
-
-st.success(f"✓ Simülasyon tamamlandı — {len(op_ids)} operatör, {n_reopt} yeniden rotalama, "
-           f"{len(cancelled)} iptal, {dyn_m['nsrv']} yeni iş dahil edildi.")
-
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "📊 Yönetici Özeti", "🕒 Dinamik Rota Planı", "👤 Operatör Karşılaştırma",
-    "🗺️ Haritalar", "📋 Detay Tablolar"])
-
-with tab1:
-    render_exec_summary(st_m, dyn_m, historical, jtype_map, st_s, dyn_s, cancelled,
-                        vpi=vpi_info, due_map=due_map)
-
-with tab2:
-    render_dynamic_plan(dyn_r, dyn_s, op_ids, op_start, coords)
-
-with tab3:
-    render_op_compare(op_ids, dyn_r, dyn_s, op_start, coords, historical, due_map,
-                      jtype_map, df, key_prefix="daily")
-
-with tab4:
-    render_maps(st_r, st_s, dyn_r, dyn_s, op_ids, op_start, coords, df, JP, due_map,
-                cancelled, new_asgn, historical, op_start, height=600)
-
-with tab5:
-    render_detail_tables(st_m, dyn_m, historical, dyn_s, cancelled, JP, due_map,
-                         jtype_map, rollover, due_exc)
+    with tab5:
+        render_detail_tables(st_m, dyn_m, historical, dyn_s, cancelled, JP, due_map,
+                             jtype_map, rollover, due_exc)
